@@ -64,17 +64,16 @@ func DefaultStateChangeListener() *StateChangeListener {
 }
 func (s *StateChangeListener) OnTransformToClosed(prev circuitbreaker.State, rule circuitbreaker.Rule) {
 	//fmt.Printf("sentinel breaker trans to closed: %+v, From %s to Closed, time: %d\n", rule.Strategy, prev.String(), util.CurrentTimeMillis())
-	log.DefaultFrameLogger().Info("sentinel breaker trans to closed", "strategy", rule.Strategy.String(), "previously state", prev.String(), "time", util.CurrentTimeMillis())
+	log.Println("sentinel breaker trans to closed", "strategy", rule.Strategy.String(), "previously state", prev.String(), "time", util.CurrentTimeMillis())
 
 }
 
 func (s *StateChangeListener) OnTransformToOpen(prev circuitbreaker.State, rule circuitbreaker.Rule, snapshot interface{}) {
 	//fmt.Printf("rule.strategy: %+v, From %s to Open, snapshot: %d, time: %d\n", rule.Strategy, prev.String(), snapshot, util.CurrentTimeMillis())
-	log.DefaultFrameLogger().Info("sentinel breaker trans to open", "strategy", rule.Strategy.String(), "previously state", prev.String(), "snapshot", snapshot, "time", util.CurrentTimeMillis())
+	log.Println("sentinel breaker trans to open", "strategy", rule.Strategy.String(), "previously state", prev.String(), "snapshot", snapshot, "time", util.CurrentTimeMillis())
 }
 
 func (s *StateChangeListener) OnTransformToHalfOpen(prev circuitbreaker.State, rule circuitbreaker.Rule) {
 	//fmt.Printf("rule.strategy: %+v, From %s to Half-Open, time: %d\n", rule.Strategy, prev.String(), util.CurrentTimeMillis())
-	log.DefaultFrameLogger().Info("sentinel breaker trans to half-open", "strategy", rule.Strategy.String(), "previously state", prev.String(), "time", util.CurrentTimeMillis())
-
+	log.Println("sentinel breaker trans to half-open", "strategy", rule.Strategy.String(), "previously state", prev.String(), "time", util.CurrentTimeMillis())
 }

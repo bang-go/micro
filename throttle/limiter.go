@@ -6,6 +6,7 @@ import (
 	"github.com/alibaba/sentinel-golang/core/flow"
 	"github.com/alibaba/sentinel-golang/logging"
 	"github.com/bang-go/opt"
+	"log"
 )
 
 type limiter struct{}
@@ -39,7 +40,7 @@ func (l *limiter) Guard(resource string, pass FuncWithErr, reject Func, opts ...
 	if b != nil {
 		// Blocked. We could get the block reason from the BlockError.
 		//log.Printf("sentinel throttle reject: %v", b.BlockMsg())
-		log.DefaultFrameLogger().Warn("sentinel throttle reject: ", "msg", b.BlockMsg())
+		log.Println("sentinel throttle reject: ", "msg", b.BlockMsg())
 		reject()
 		return false
 	} else {
