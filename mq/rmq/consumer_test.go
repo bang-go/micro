@@ -13,11 +13,14 @@ import (
 func TestConsumer(t *testing.T) {
 	c, err := rmq.NewSimpleConsumer(&rmq.ConsumerConfig{
 		AwaitDuration: 10 * time.Second,
-		Topic:         "",
-		Group:         "",
-		Endpoint:      "",
-		AccessKey:     "",
-		SecretKey:     ""})
+		SubscriptionExpressions: map[string]*rmq.FilterExpression{
+			"topic1": rmq.SubAll,
+			"topic2": rmq.NewFilterExpression("tag1"),
+		},
+		Group:     "",
+		Endpoint:  "",
+		AccessKey: "",
+		SecretKey: ""})
 	if err != nil {
 		log.Fatal(err)
 	}

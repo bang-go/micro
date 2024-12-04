@@ -2,6 +2,7 @@ package rmq
 
 import (
 	"context"
+	"errors"
 	rmqClient "github.com/apache/rocketmq-clients/golang/v5"
 	"github.com/apache/rocketmq-clients/golang/v5/credentials"
 	"github.com/bang-go/util"
@@ -16,7 +17,13 @@ const (
 
 type SimpleConsumer = rmqClient.SimpleConsumer
 type MessageView = rmqClient.MessageView
+type FilterExpression = rmqClient.FilterExpression
 type MessageViewFunc func(*MessageView) bool
+
+var NewFilterExpression = rmqClient.NewFilterExpression
+var NewFilterExpressionWithType = rmqClient.NewFilterExpressionWithType
+var SubAll = rmqClient.SUB_ALL
+
 type Consumer interface {
 	Start() error
 	Receive() ([]*MessageView, error)
@@ -30,20 +37,32 @@ type consumerEntity struct {
 	*ConsumerConfig
 }
 type ConsumerConfig struct {
-	Topic             string
-	Group             string
-	Endpoint          string
-	AccessKey         string
-	SecretKey         string
-	AwaitDuration     time.Duration // maximum waiting time for receive func
-	MaxMessageNum     int32         // maximum number of messages received at one time
-	InvisibleDuration time.Duration // invisibleDuration should > 20s
+	Topic                   string
+	Group                   string
+	Endpoint                string
+	AccessKey               string
+	SecretKey               string
+	SubscriptionExpressions map[string]*FilterExpression
+	AwaitDuration           time.Duration // maximum waiting time for receive func
+	MaxMessageNum           int32         // maximum number of messages received at one time
+	InvisibleDuration       time.Duration // invisibleDuration should > 20s
+
 }
 
 func NewSimpleConsumer(conf *ConsumerConfig) (Consumer, error) {
 	var err error
 	consumer := &consumerEntity{ConsumerConfig: conf}
 	await := util.If(conf.AwaitDuration > 0, conf.AwaitDuration, DefaultConsumerAwaitDuration)
+	var subscriptionExpressions map[string]*FilterExpression
+	if len(conf.SubscriptionExpressions) > 0 { //优先filter
+		subscriptionExpressions = conf.SubscriptionExpressions
+	} else if conf.Topic != "" { //topic
+		subscriptionExpressions = map[string]*FilterExpression{conf.Topic: rmqClient.SUB_ALL}
+	} else {
+		err = errors.New("未设置订阅topic")
+		return nil, err
+	}
+
 	consumer.simpleConsumer, err = rmqClient.NewSimpleConsumer(&rmqClient.Config{
 		Endpoint:      conf.Endpoint,
 		ConsumerGroup: conf.Group,
@@ -53,9 +72,7 @@ func NewSimpleConsumer(conf *ConsumerConfig) (Consumer, error) {
 		},
 	},
 		rmqClient.WithAwaitDuration(await),
-		rmqClient.WithSubscriptionExpressions(map[string]*rmqClient.FilterExpression{
-			conf.Topic: rmqClient.SUB_ALL,
-		}),
+		rmqClient.WithSubscriptionExpressions(subscriptionExpressions),
 	)
 	return consumer, err
 }

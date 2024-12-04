@@ -4,6 +4,7 @@ import (
 	"context"
 	rmqClient "github.com/apache/rocketmq-clients/golang/v5"
 	"github.com/apache/rocketmq-clients/golang/v5/credentials"
+	"time"
 )
 
 type RProducer = rmqClient.Producer
@@ -13,6 +14,8 @@ type Producer interface {
 	GetProducer() RProducer
 	SendNormalMessage(context.Context, *Message) ([]*SendReceipt, error)
 	AsyncSendNormalMessage(context.Context, *Message, AsyncSendHandler)
+	SendFifoMessage(context.Context, *Message) ([]*SendReceipt, error)
+	SendDelayMessage(context.Context, *Message, time.Time) ([]*SendReceipt, error)
 }
 type producerEntity struct {
 	*ProducerConfig
@@ -38,7 +41,7 @@ func NewProducer(conf *ProducerConfig) (Producer, error) {
 			AccessSecret: conf.SecretKey,
 		},
 	},
-		//rmqClient.WithTopics(conf.Topic),
+	//rmqClient.WithTopics(conf.Topic),
 	)
 	return producer, err
 }
@@ -60,4 +63,16 @@ func (p *producerEntity) SendNormalMessage(ctx context.Context, msg *Message) ([
 func (p *producerEntity) AsyncSendNormalMessage(ctx context.Context, msg *Message, handler AsyncSendHandler) {
 	p.GetProducer().SendAsync(ctx, msg, handler)
 	return
+}
+
+// SendFifoMessage 发送顺序消息
+func (p *producerEntity) SendFifoMessage(ctx context.Context, msg *Message) ([]*SendReceipt, error) {
+	msg.SetMessageGroup("fifo")
+	return p.GetProducer().Send(ctx, msg)
+}
+
+// SendDelayMessage 发送延时消息
+func (p *producerEntity) SendDelayMessage(ctx context.Context, msg *Message, delayTimestamp time.Time) ([]*SendReceipt, error) {
+	msg.SetDelayTimestamp(delayTimestamp)
+	return p.GetProducer().Send(ctx, msg)
 }
