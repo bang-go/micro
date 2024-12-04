@@ -2,8 +2,6 @@ package rmq_test
 
 import (
 	"context"
-	rmqClient "github.com/apache/rocketmq-clients/golang/v5"
-	v2 "github.com/apache/rocketmq-clients/golang/v5/protocol/v2"
 	"github.com/bang-go/micro/mq/rmq"
 	"log"
 	"testing"
@@ -31,9 +29,9 @@ func TestConsumer(t *testing.T) {
 	defer c.Close()
 	for {
 		mvs, err := c.Receive()
-		if errRpcStatus, ok := rmqClient.AsErrRpcStatus(err); ok {
+		if errRpcStatus, ok := rmq.AsErrRpcStatus(err); ok {
 			log.Println(errRpcStatus.GetCode(), errRpcStatus.GetMessage())
-			if errRpcStatus.GetCode() == int32(v2.Code_MESSAGE_NOT_FOUND) {
+			if errRpcStatus.GetCode() == int32(rmq.Code_MESSAGE_NOT_FOUND) {
 				log.Println("no message")
 			}
 		}

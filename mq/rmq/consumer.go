@@ -5,6 +5,7 @@ import (
 	"errors"
 	rmqClient "github.com/apache/rocketmq-clients/golang/v5"
 	"github.com/apache/rocketmq-clients/golang/v5/credentials"
+	v2 "github.com/apache/rocketmq-clients/golang/v5/protocol/v2"
 	"github.com/bang-go/util"
 	"time"
 )
@@ -19,10 +20,16 @@ type SimpleConsumer = rmqClient.SimpleConsumer
 type MessageView = rmqClient.MessageView
 type FilterExpression = rmqClient.FilterExpression
 type MessageViewFunc func(*MessageView) bool
+type ErrRpcStatus = rmqClient.ErrRpcStatus
 
+var AsErrRpcStatus = rmqClient.AsErrRpcStatus
 var NewFilterExpression = rmqClient.NewFilterExpression
 var NewFilterExpressionWithType = rmqClient.NewFilterExpressionWithType
 var SubAll = rmqClient.SUB_ALL
+
+const (
+	Code_MESSAGE_NOT_FOUND = v2.Code_MESSAGE_NOT_FOUND
+)
 
 type Consumer interface {
 	Start() error
