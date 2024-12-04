@@ -14,6 +14,7 @@ const (
 	DefaultConsumerAwaitDuration           = time.Second * 5
 	DefaultConsumerMaxMessageNum     int32 = 16
 	DefaultConsumerInvisibleDuration       = time.Second * 20
+	ConsumerMaxMessageNum            int32 = 32 //rocketmq sdk限制最大只能是32
 )
 
 type SimpleConsumer = rmqClient.SimpleConsumer
@@ -64,12 +65,11 @@ func NewSimpleConsumer(conf *ConsumerConfig) (Consumer, error) {
 	if len(conf.SubscriptionExpressions) > 0 { //优先filter
 		subscriptionExpressions = conf.SubscriptionExpressions
 	} else if conf.Topic != "" { //topic
-		subscriptionExpressions = map[string]*FilterExpression{conf.Topic: rmqClient.SUB_ALL}
+		subscriptionExpressions = map[string]*FilterExpression{conf.Topic: SubAll}
 	} else {
 		err = errors.New("未设置订阅topic")
 		return nil, err
 	}
-
 	consumer.simpleConsumer, err = rmqClient.NewSimpleConsumer(&rmqClient.Config{
 		Endpoint:      conf.Endpoint,
 		ConsumerGroup: conf.Group,
