@@ -2,6 +2,7 @@ package mqttx
 
 import (
 	"fmt"
+	"github.com/bang-go/util"
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 )
 
@@ -13,6 +14,9 @@ const (
 var defaultProtocolVersion uint = 4
 
 type Config struct {
+	ClientId              string
+	Username              string
+	Password              string
 	AccessKeyId           string
 	AccessKeySecret       string
 	InstanceId            string
@@ -41,12 +45,17 @@ type clientEntity struct {
 
 func New(cfg *Config) (Client, error) {
 	client := &clientEntity{}
-	clientId := GetClientId(cfg.GroupId, cfg.DeviceId)
+	clientId := util.If(cfg.ClientId == "", cfg.ClientId, GetClientId(cfg.GroupId, cfg.DeviceId))
+	username := util.If(cfg.Username == "", cfg.Username, GetUserName(AuthModeSignature, cfg.AccessKeyId, cfg.InstanceId))
+	password := util.If(cfg.Password == "", cfg.Password, GetSignPassword(clientId, cfg.AccessKeySecret))
+	if clientId == "" || username == "" || password == "" {
+		return nil, fmt.Errorf("clientId or username or password is empty")
+	}
 	opts := mqtt.NewClientOptions()
 	opts.AddBroker(cfg.Endpoint)
 	opts.SetClientID(clientId)
-	opts.SetUsername(GetUserName(AuthModeSignature, cfg.AccessKeyId, cfg.InstanceId)) //暂时只支持签名授权
-	opts.SetPassword(GetSignPassword(clientId, cfg.AccessKeySecret))
+	opts.SetUsername(username) //暂时只支持签名授权
+	opts.SetPassword(password)
 	var publishHandler = &defaultPublishHandler
 	if cfg.DefaultPublishHandler != nil {
 		publishHandler = cfg.DefaultPublishHandler
