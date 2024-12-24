@@ -2,7 +2,6 @@ package mqttx_test
 
 import (
 	"fmt"
-	"github.com/bang-go/micro/mq/mqttx"
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 	"log"
 	"testing"
@@ -12,16 +11,16 @@ func TestClient(t *testing.T) {
 	groupId := ""
 	topic := ""
 	deviceId := ""
-	clientId := mqttx.GetClientId(groupId, deviceId)
+	clientId := mqt.GetClientId(groupId, deviceId)
 	accessKeyId := ""
 	accessKeySecret := ""
 	instanceId := ""
 	endpoint := ""
-	username := mqttx.GetUserName(mqttx.AuthModeSignature, accessKeyId, instanceId)
-	password := mqttx.GetSignPassword(clientId, accessKeySecret)
+	username := mqt.GetUserName(mqt.AuthModeSignature, accessKeyId, instanceId)
+	password := mqt.GetSignPassword(clientId, accessKeySecret)
 	log.Println(username)
 	log.Println(password)
-	client, err := mqttx.New(&mqttx.Config{AccessKeyId: accessKeyId, AccessKeySecret: accessKeySecret, Endpoint: endpoint, InstanceId: instanceId, GroupId: groupId, DeviceId: deviceId})
+	client, err := mqt.New(&mqt.Config{AccessKeyId: accessKeyId, AccessKeySecret: accessKeySecret, Endpoint: endpoint, InstanceId: instanceId, GroupId: groupId, DeviceId: deviceId})
 	if err != nil {
 		log.Fatal(err)
 	}
