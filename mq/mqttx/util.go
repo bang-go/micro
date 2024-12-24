@@ -5,7 +5,7 @@ import (
 	"github.com/bang-go/util/cipher"
 )
 
-func GetUserName(authMode, accessKeyId, instanceId string) string {
+func GetUsername(authMode, accessKeyId, instanceId string) string {
 	return fmt.Sprintf("%s|%s|%s", authMode, accessKeyId, instanceId)
 }
 

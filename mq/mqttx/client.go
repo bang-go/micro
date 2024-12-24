@@ -17,12 +17,12 @@ type Config struct {
 	ClientId              string
 	Username              string
 	Password              string
-	AccessKeyId           string
-	AccessKeySecret       string
-	InstanceId            string
+	AccessKeyId           string //如未设置username,则必填
+	AccessKeySecret       string //如未设置password,则必填
+	InstanceId            string //如未设置username,则必填
 	Endpoint              string //tcp://foobar.com:1883
-	GroupId               string
-	DeviceId              string //设备id
+	GroupId               string //如未设置clientId,则必填
+	DeviceId              string //如未设置clientId,则必填
 	ProtocolVersion       uint
 	DefaultPublishHandler *mqtt.MessageHandler
 	ConnectHandler        *mqtt.OnConnectHandler
@@ -46,7 +46,7 @@ type clientEntity struct {
 func New(cfg *Config) (Client, error) {
 	client := &clientEntity{}
 	clientId := util.If(cfg.ClientId == "", cfg.ClientId, GetClientId(cfg.GroupId, cfg.DeviceId))
-	username := util.If(cfg.Username == "", cfg.Username, GetUserName(AuthModeSignature, cfg.AccessKeyId, cfg.InstanceId))
+	username := util.If(cfg.Username == "", cfg.Username, GetUsername(AuthModeSignature, cfg.AccessKeyId, cfg.InstanceId))
 	password := util.If(cfg.Password == "", cfg.Password, GetSignPassword(clientId, cfg.AccessKeySecret))
 	if clientId == "" || username == "" || password == "" {
 		return nil, fmt.Errorf("clientId or username or password is empty")
