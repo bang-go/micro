@@ -45,9 +45,9 @@ type clientEntity struct {
 
 func New(cfg *Config) (Client, error) {
 	client := &clientEntity{}
-	clientId := util.If(cfg.ClientId == "", cfg.ClientId, GetClientId(cfg.GroupId, cfg.DeviceId))
-	username := util.If(cfg.Username == "", cfg.Username, GetUsername(AuthModeSignature, cfg.AccessKeyId, cfg.InstanceId))
-	password := util.If(cfg.Password == "", cfg.Password, GetSignPassword(clientId, cfg.AccessKeySecret))
+	clientId := util.If(cfg.ClientId != "", cfg.ClientId, GetClientId(cfg.GroupId, cfg.DeviceId))
+	username := util.If(cfg.Username != "", cfg.Username, GetUsername(AuthModeSignature, cfg.AccessKeyId, cfg.InstanceId))
+	password := util.If(cfg.Password != "", cfg.Password, GetSignPassword(clientId, cfg.AccessKeySecret))
 	if clientId == "" || username == "" || password == "" {
 		return nil, fmt.Errorf("clientId or username or password is empty")
 	}
