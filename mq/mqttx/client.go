@@ -78,7 +78,9 @@ func New(cfg *Config) (Client, error) {
 	opts.OnConnect = *connectHandler
 	opts.OnConnectionLost = *connectLostHandler
 	opts.OnReconnecting = *reconnectHandler
-	opts.KeepAlive = cfg.KeepAlive
+	if cfg.KeepAlive > 0 {
+		opts.KeepAlive = cfg.KeepAlive
+	}
 	//opts.SetProtocolVersion(util.If(cfg.ProtocolVersion > 0, cfg.ProtocolVersion, defaultProtocolVersion))
 	client.mqttClient = mqtt.NewClient(opts)
 	if token := client.mqttClient.Connect(); token.Wait() && token.Error() != nil {
