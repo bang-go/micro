@@ -24,9 +24,9 @@ func TestClient(t *testing.T) {
 		log.Fatal(err)
 	}
 	log.Println("-----")
-	client.Subscribe(topic, 1, func(client mqtt.Client, msg mqtt.Message) {
+	_ = client.Subscribe(topic, 1, func(client mqtt.Client, msg mqtt.Message) {
 		fmt.Printf("subscribe message: %s from topic: %s\n", msg.Payload(), msg.Topic())
 	})
-	client.Publish(topic, 0, false, "123")
+	_ = client.Publish(topic, 0, false, "foo")
 	client.Disconnect(1000)
 }

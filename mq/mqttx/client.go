@@ -23,6 +23,7 @@ type Config struct {
 	Endpoint              string //tcp://foobar.com:1883
 	GroupId               string //如未设置clientId,则必填
 	DeviceId              string //如未设置clientId,则必填
+	KeepAlive             int64
 	ProtocolVersion       uint
 	DefaultPublishHandler *mqtt.MessageHandler
 	ConnectHandler        *mqtt.OnConnectHandler
@@ -32,10 +33,10 @@ type Config struct {
 type MessageHandler = mqtt.MessageHandler
 type Client interface {
 	Disconnect(quiesce uint) //milliseconds
-	Publish(topic string, qos byte, retained bool, payload interface{})
-	Subscribe(topic string, qos byte, callback MessageHandler)
-	SubscribeMultiple(filters map[string]byte, callback MessageHandler)
-	Unsubscribe(topics ...string)
+	Publish(topic string, qos byte, retained bool, payload interface{}) error
+	Subscribe(topic string, qos byte, callback MessageHandler) error
+	SubscribeMultiple(filters map[string]byte, callback MessageHandler) error
+	Unsubscribe(topics ...string) error
 	AddRoute(topic string, callback MessageHandler)
 }
 type clientEntity struct {
@@ -77,6 +78,7 @@ func New(cfg *Config) (Client, error) {
 	opts.OnConnect = *connectHandler
 	opts.OnConnectionLost = *connectLostHandler
 	opts.OnReconnecting = *reconnectHandler
+	opts.KeepAlive = cfg.KeepAlive
 	//opts.SetProtocolVersion(util.If(cfg.ProtocolVersion > 0, cfg.ProtocolVersion, defaultProtocolVersion))
 	client.mqttClient = mqtt.NewClient(opts)
 	if token := client.mqttClient.Connect(); token.Wait() && token.Error() != nil {
@@ -85,24 +87,32 @@ func New(cfg *Config) (Client, error) {
 	return client, nil
 }
 
-func (s *clientEntity) Publish(topic string, qos byte, retained bool, payload interface{}) {
-	token := s.mqttClient.Publish(topic, qos, retained, payload)
-	token.Wait()
+func (s *clientEntity) Publish(topic string, qos byte, retained bool, payload interface{}) (err error) {
+	if token := s.mqttClient.Publish(topic, qos, retained, payload); token.Wait() && token.Error() != nil {
+		return token.Error()
+	}
+	return
 }
 
-func (s *clientEntity) Subscribe(topic string, qos byte, callback MessageHandler) {
-	token := s.mqttClient.Subscribe(topic, qos, callback)
-	token.Wait()
+func (s *clientEntity) Subscribe(topic string, qos byte, callback MessageHandler) (err error) {
+	if token := s.mqttClient.Subscribe(topic, qos, callback); token.Wait() && token.Error() != nil {
+		return token.Error()
+	}
+	return
 }
 
-func (s *clientEntity) SubscribeMultiple(filters map[string]byte, callback MessageHandler) {
-	token := s.mqttClient.SubscribeMultiple(filters, callback)
-	token.Wait()
+func (s *clientEntity) SubscribeMultiple(filters map[string]byte, callback MessageHandler) (err error) {
+	if token := s.mqttClient.SubscribeMultiple(filters, callback); token.Wait() && token.Error() != nil {
+		return token.Error()
+	}
+	return
 }
 
-func (s *clientEntity) Unsubscribe(topics ...string) {
-	token := s.mqttClient.Unsubscribe(topics...)
-	token.Wait()
+func (s *clientEntity) Unsubscribe(topics ...string) (err error) {
+	if token := s.mqttClient.Unsubscribe(topics...); token.Wait() && token.Error() != nil {
+		return token.Error()
+	}
+	return
 }
 
 func (s *clientEntity) Disconnect(quiesce uint) {
@@ -114,16 +124,16 @@ func (s *clientEntity) AddRoute(topic string, callback MessageHandler) {
 }
 
 var defaultPublishHandler mqtt.MessageHandler = func(client mqtt.Client, msg mqtt.Message) {
-	fmt.Printf("Received message: %s from topic: %s\n", msg.Payload(), msg.Topic())
+	//fmt.Printf("Received message: %s from topic: %s\n", msg.Payload(), msg.Topic())
 }
 
 var defaultConnectHandler mqtt.OnConnectHandler = func(client mqtt.Client) {
-	fmt.Println("Connected")
+	//fmt.Println("Connected")
 }
 var defaultReconnectHandler mqtt.ReconnectHandler = func(client mqtt.Client, options *mqtt.ClientOptions) {
-	fmt.Println("Reconnected")
+	//fmt.Println("Reconnected")
 
 }
 var defaultConnectLostHandler mqtt.ConnectionLostHandler = func(client mqtt.Client, err error) {
-	fmt.Printf("Connect lost: %v", err)
+	//fmt.Printf("Connect lost: %v", err)
 }
