@@ -50,6 +50,10 @@ type SuggestItem struct {
 	Suggestion string `json:"suggestion"`
 }
 
+type ResponseSearchList[T any] struct {
+	Headers ResponseHeader `json:"headers"`
+	Body    SearchBody[T]  `json:"body"`
+}
 type SearchBody[T any] struct {
 	Error          []ResponseError `json:"error"`
 	OpsRequestMisc string          `json:"ops_request_misc"`
