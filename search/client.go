@@ -17,6 +17,10 @@ type Config struct {
 	UserAgent       *string `json:"userAgent,omitempty" xml:"userAgent,omitempty"`
 }
 
+type ResponseError struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+}
 type ResponseHeader struct {
 	Connection     string `json:"connection"`
 	ContentType    string `json:"content-type"`
@@ -44,6 +48,30 @@ type SuggestBody struct {
 }
 type SuggestItem struct {
 	Suggestion string `json:"suggestion"`
+}
+
+type SearchBody[T any] struct {
+	Error          []ResponseError `json:"error"`
+	OpsRequestMisc string          `json:"ops_request_misc"`
+	RequestId      string          `json:"request_id"`
+	Status         string          `json:"status"`
+	Trace          string          `json:"trace"`
+	Result         struct {
+		Facet      []any               `json:"facet"`
+		Num        uint32              `json:"num"`
+		SearchTime float64             `json:"searchtime"`
+		Total      uint32              `json:"total"`
+		ViewTotal  uint32              `json:"viewtotal"`
+		Items      []SearchBodyItem[T] `json:"Items"`
+	} `json:"result"`
+}
+
+type SearchBodyItem[T any] struct {
+	VariableValue  map[string]any `json:"variableValue"`
+	Property       map[string]any `json:"property"`
+	Attribute      map[string]any `json:"attribute"`
+	SortExprValues []any          `json:"sortExprValues"`
+	Fields         T              `json:"fields"`
 }
 
 type Client struct {
