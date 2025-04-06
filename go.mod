@@ -4,18 +4,22 @@ go 1.23.2
 
 require (
 	github.com/alibaba/sentinel-golang v1.0.4
-	github.com/apache/rocketmq-clients/golang/v5 v5.1.1-rc1
+	github.com/apache/rocketmq-clients/golang/v5 v5.1.2
 	github.com/bang-go/opt v0.0.2
-	github.com/bang-go/util v0.0.8
+	github.com/bang-go/util v0.1.1
 	github.com/eclipse/paho.mqtt.golang v1.5.0
-	github.com/nacos-group/nacos-sdk-go/v2 v2.2.7
+	github.com/nacos-group/nacos-sdk-go/v2 v2.2.9
 )
 
 require (
+	github.com/alibabacloud-go/opensearch-util v1.0.1 // indirect
+	github.com/aliyun/credentials-go v1.4.5 // indirect
+	github.com/klauspost/compress v1.16.7 // indirect
+	github.com/pierrec/lz4 v2.6.1+incompatible // indirect
 	google.golang.org/genproto v0.0.0-20230410155749-daa745c078e1 // indirect
 	google.golang.org/grpc v1.56.3 // indirect
 	google.golang.org/protobuf v1.33.0 // indirect
-	gopkg.in/ini.v1 v1.66.2 // indirect
+	gopkg.in/ini.v1 v1.67.0 // indirect
 	gopkg.in/natefinch/lumberjack.v2 v2.0.0 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 )
@@ -23,12 +27,12 @@ require (
 require (
 	contrib.go.opencensus.io/exporter/ocagent v0.6.0 // indirect
 	github.com/StackExchange/wmi v0.0.0-20190523213315-cbe66965904d // indirect
-	github.com/alibabacloud-go/debug v0.0.0-20190504072949-9472017b5c68 // indirect
-	github.com/alibabacloud-go/tea v1.1.17 // indirect
+	github.com/alibabacloud-go/debug v1.0.1 // indirect
+	github.com/alibabacloud-go/tea v1.2.2 // indirect
 	github.com/alibabacloud-go/tea-utils v1.4.4 // indirect
 	github.com/aliyun/alibaba-cloud-sdk-go v1.61.1800 // indirect
-	github.com/aliyun/alibabacloud-dkms-gcs-go-sdk v0.2.2 // indirect
-	github.com/aliyun/alibabacloud-dkms-transfer-go-sdk v0.1.7 // indirect
+	github.com/aliyun/alibabacloud-dkms-gcs-go-sdk v0.5.1 // indirect
+	github.com/aliyun/alibabacloud-dkms-transfer-go-sdk v0.1.8 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/buger/jsonparser v1.1.1 // indirect
 	github.com/census-instrumentation/opencensus-proto v0.4.1 // indirect
@@ -65,11 +69,11 @@ require (
 	go.uber.org/atomic v1.9.0 // indirect
 	go.uber.org/multierr v1.8.0 // indirect
 	go.uber.org/zap v1.21.0 // indirect
-	golang.org/x/crypto v0.25.0 // indirect
-	golang.org/x/net v0.27.0 // indirect
-	golang.org/x/sync v0.7.0 // indirect
-	golang.org/x/sys v0.22.0 // indirect
-	golang.org/x/text v0.16.0 // indirect
+	golang.org/x/crypto v0.31.0 // indirect
+	golang.org/x/net v0.33.0 // indirect
+	golang.org/x/sync v0.10.0 // indirect
+	golang.org/x/sys v0.28.0 // indirect
+	golang.org/x/text v0.21.0 // indirect
 	golang.org/x/time v0.1.0 // indirect
 	google.golang.org/api v0.30.0 // indirect; i
 )
