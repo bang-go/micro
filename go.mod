@@ -28,7 +28,7 @@ require (
 	github.com/alibabacloud-go/tea-utils/v2 v2.0.7 // indirect
 	github.com/alibabacloud-go/tea-xml v1.1.3 // indirect
 	github.com/aliyun/aliyun-secretsmanager-client-go v1.1.5 // indirect
-	github.com/clbanning/mxj/v2 v2.5.5 // indirect
+	github.com/clbanning/mxj/v2 v2.7.0 // indirect
 	github.com/deckarep/golang-set v1.7.1 // indirect
 	github.com/klauspost/compress v1.16.7 // indirect
 	github.com/orcaman/concurrent-map v0.0.0-20210501183033-44dafcb38ecc // indirect
@@ -46,8 +46,8 @@ require (
 	contrib.go.opencensus.io/exporter/ocagent v0.6.0 // indirect
 	github.com/StackExchange/wmi v0.0.0-20190523213315-cbe66965904d // indirect
 	github.com/alibabacloud-go/debug v1.0.1 // indirect
-	github.com/alibabacloud-go/tea v1.2.2
-	github.com/alibabacloud-go/tea-utils v1.4.4
+	github.com/alibabacloud-go/tea v1.3.7
+	github.com/alibabacloud-go/tea-utils v1.4.5
 	github.com/aliyun/alibaba-cloud-sdk-go v1.61.1800 // indirect
 	github.com/aliyun/alibabacloud-dkms-gcs-go-sdk v0.5.1 // indirect
 	github.com/aliyun/alibabacloud-dkms-transfer-go-sdk v0.1.8 // indirect

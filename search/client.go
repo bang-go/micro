@@ -1,7 +1,3 @@
-// This file is auto-generated, don't edit it. Thanks.
-/**
- *
- */
 package search
 
 import (
@@ -19,6 +15,35 @@ type Config struct {
 	AccessKeyId     *string `json:"accessKeyId,omitempty" xml:"accessKeyId,omitempty"`
 	AccessKeySecret *string `json:"accessKeySecret,omitempty" xml:"accessKeySecret,omitempty"`
 	UserAgent       *string `json:"userAgent,omitempty" xml:"userAgent,omitempty"`
+}
+
+type ResponseHeader struct {
+	Connection     string `json:"connection"`
+	ContentType    string `json:"content-type"`
+	Date           string `json:"date"`
+	KeepAlive      string `json:"keep-alive"`
+	RequestId      string `json:"request-id"`
+	Server         string `json:"server"`
+	XAcsApiName    string `json:"x-acs-api-name"`
+	XAcsCallerType string `json:"x-acs-caller-type"`
+	XAcsCallerUid  string `json:"x-acs-caller-uid"`
+	XAcsParentUid  string `json:"x-acs-parent-uid"`
+	XAliyunUserId  string `json:"x-aliyun-user-id"`
+	XAppId         string `json:"x-app-id"`
+	XAppName       string `json:"x-app-name"`
+	XAppgroupId    string `json:"x-appgroup-id"`
+}
+type ResponseSuggestList struct {
+	Headers ResponseHeader `json:"headers"`
+	Body    SuggestBody    `json:"body"`
+}
+type SuggestBody struct {
+	RequestId   string        `json:"request_id"`
+	SearchTime  float64       `json:"searchtime"`
+	Suggestions []SuggestItem `json:"suggestions"`
+}
+type SuggestItem struct {
+	Suggestion string `json:"suggestion"`
 }
 
 type Client struct {
