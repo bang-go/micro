@@ -61,22 +61,23 @@ type SearchBody[T any] struct {
 	Status         string          `json:"status"`
 	Trace          string          `json:"trace"`
 	Result         struct {
-		Facet      []any               `json:"facet"`
-		Num        uint32              `json:"num"`
-		SearchTime float64             `json:"searchtime"`
-		Total      uint32              `json:"total"`
-		ViewTotal  uint32              `json:"viewtotal"`
-		Items      []SearchBodyItem[T] `json:"Items"`
+		ComputeCost []any   `json:"compute_cost"`
+		Facet       []any   `json:"facet"`
+		Num         uint32  `json:"num"`
+		SearchTime  float64 `json:"searchtime"`
+		Total       uint32  `json:"total"`
+		ViewTotal   uint32  `json:"viewtotal"`
+		Items       []T     `json:"Items"`
 	} `json:"result"`
 }
 
-type SearchBodyItem[T any] struct {
-	VariableValue  map[string]any `json:"variableValue"`
-	Property       map[string]any `json:"property"`
-	Attribute      map[string]any `json:"attribute"`
-	SortExprValues []any          `json:"sortExprValues"`
-	Fields         T              `json:"fields"`
-}
+//type SearchBodyItem[T any] struct {
+//	VariableValue  map[string]any `json:"variableValue"`
+//	Property       map[string]any `json:"property"`
+//	Attribute      map[string]any `json:"attribute"`
+//	SortExprValues []any          `json:"sortExprValues"`
+//	Fields         T              `json:"fields"`
+//}
 
 type Client struct {
 	Endpoint   *string
