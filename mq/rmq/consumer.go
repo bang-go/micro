@@ -126,8 +126,8 @@ func NewSimpleConsumer(conf *ConsumerConfig) (Consumer, error) {
 			AccessSecret: conf.SecretKey,
 		},
 	},
-		rmqClient.WithSimpleAwaitDuration(await),
-		rmqClient.WithSimpleSubscriptionExpressions(subscriptionExpressions),
+		rmqClient.WithAwaitDuration(await),
+		rmqClient.WithSubscriptionExpressions(subscriptionExpressions),
 	)
 	if err != nil {
 		return nil, err
