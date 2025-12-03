@@ -45,13 +45,30 @@ type clientEntity struct {
 	*Config
 }
 
+// New 创建新的 MQTT 客户端
+// cfg: MQTT 配置
+// 返回: Client 实例和错误
 func New(cfg *Config) (Client, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("Config 不能为 nil")
+	}
+	if cfg.Endpoint == "" {
+		return nil, fmt.Errorf("Endpoint 不能为空")
+	}
+
 	client := &clientEntity{}
 	clientId := util.If(cfg.ClientId != "", cfg.ClientId, GetClientId(cfg.GroupId, cfg.DeviceId))
 	username := util.If(cfg.Username != "", cfg.Username, GetUsername(AuthModeSignature, cfg.AccessKeyId, cfg.InstanceId))
 	password := util.If(cfg.Password != "", cfg.Password, GetSignPassword(clientId, cfg.AccessKeySecret))
-	if clientId == "" || username == "" || password == "" {
-		return nil, fmt.Errorf("clientId or username or password is empty")
+
+	if clientId == "" {
+		return nil, fmt.Errorf("clientId 不能为空，请设置 ClientId 或 GroupId+DeviceId")
+	}
+	if username == "" {
+		return nil, fmt.Errorf("username 不能为空，请设置 Username 或 AccessKeyId+InstanceId")
+	}
+	if password == "" {
+		return nil, fmt.Errorf("password 不能为空，请设置 Password 或 AccessKeySecret")
 	}
 	opts := pahomqtt.NewClientOptions()
 	opts.AddBroker(cfg.Endpoint)
@@ -90,38 +107,45 @@ func New(cfg *Config) (Client, error) {
 	return client, nil
 }
 
-func (s *clientEntity) Publish(topic string, qos byte, retained bool, payload interface{}) (err error) {
+// Publish 发布消息到指定主题
+func (s *clientEntity) Publish(topic string, qos byte, retained bool, payload interface{}) error {
 	if token := s.mqttClient.Publish(topic, qos, retained, payload); token.Wait() && token.Error() != nil {
 		return token.Error()
 	}
-	return
+	return nil
 }
 
-func (s *clientEntity) Subscribe(topic string, qos byte, callback MessageHandler) (err error) {
+// Subscribe 订阅指定主题
+func (s *clientEntity) Subscribe(topic string, qos byte, callback MessageHandler) error {
 	if token := s.mqttClient.Subscribe(topic, qos, callback); token.Wait() && token.Error() != nil {
 		return token.Error()
 	}
-	return
+	return nil
 }
 
-func (s *clientEntity) SubscribeMultiple(filters map[string]byte, callback MessageHandler) (err error) {
+// SubscribeMultiple 订阅多个主题
+func (s *clientEntity) SubscribeMultiple(filters map[string]byte, callback MessageHandler) error {
 	if token := s.mqttClient.SubscribeMultiple(filters, callback); token.Wait() && token.Error() != nil {
 		return token.Error()
 	}
-	return
+	return nil
 }
 
-func (s *clientEntity) Unsubscribe(topics ...string) (err error) {
+// Unsubscribe 取消订阅主题
+func (s *clientEntity) Unsubscribe(topics ...string) error {
 	if token := s.mqttClient.Unsubscribe(topics...); token.Wait() && token.Error() != nil {
 		return token.Error()
 	}
-	return
+	return nil
 }
 
+// Disconnect 断开连接
+// quiesce: 断开前的等待时间（毫秒）
 func (s *clientEntity) Disconnect(quiesce uint) {
 	s.mqttClient.Disconnect(quiesce)
 }
 
+// AddRoute 添加路由规则
 func (s *clientEntity) AddRoute(topic string, callback MessageHandler) {
 	s.mqttClient.AddRoute(topic, callback)
 }

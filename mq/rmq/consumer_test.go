@@ -44,7 +44,7 @@ func TestConsumer(t *testing.T) {
 		}
 		for _, mv := range mvs {
 			log.Println(mv)
-			err = c.Ack(context.TODO(), mv)
+			err = c.Ack(context.Background(), mv)
 			if err != nil {
 				log.Fatal(err)
 			}

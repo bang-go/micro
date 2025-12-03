@@ -24,7 +24,7 @@ func TestProducer(t *testing.T) {
 		_ = p.Close()
 	}(p)
 	msg := &rmq.Message{Body: []byte(""), Topic: ""}
-	sendReceipt, err := p.SendNormalMessage(context.TODO(), msg)
+	sendReceipt, err := p.SendNormalMessage(context.Background(), msg)
 	if err != nil {
 		log.Fatal(err)
 	}
