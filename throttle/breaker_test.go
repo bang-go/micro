@@ -27,7 +27,7 @@ func TestErrorRatio(t *testing.T) {
 	}})
 	checkError(err)
 	var sg = sync.WaitGroup{}
-	var concurrent int = 1000
+	var concurrent = 1000
 	sg.Add(concurrent)
 	for i := 0; i < concurrent; i++ {
 		go func() {
@@ -65,7 +65,7 @@ func TestRtRatio(t *testing.T) {
 	}})
 	checkError(err)
 	var sg = sync.WaitGroup{}
-	var concurrent int = 1000
+	var concurrent = 1000
 	sg.Add(concurrent)
 	for i := 0; i < concurrent; i++ {
 		go func() {
@@ -99,7 +99,7 @@ func TestErrorCount(t *testing.T) {
 	}})
 	checkError(err)
 	var sg = sync.WaitGroup{}
-	var concurrent int = 1000
+	var concurrent = 1000
 	sg.Add(concurrent)
 	for i := 0; i < concurrent; i++ {
 		go func() {

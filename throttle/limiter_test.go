@@ -22,7 +22,7 @@ func TestFlow(t *testing.T) {
 	}})
 	limitCheckError(err)
 	var sg = sync.WaitGroup{}
-	var concurrent int = 100
+	var concurrent = 100
 	sg.Add(concurrent)
 	for i := 0; i < concurrent; i++ {
 		go func() {

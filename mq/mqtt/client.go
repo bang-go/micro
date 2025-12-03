@@ -1,10 +1,10 @@
-package mqttx
+package mqtt
 
 import (
 	"fmt"
 
 	"github.com/bang-go/util"
-	mqtt "github.com/eclipse/paho.mqtt.golang"
+	pahomqtt "github.com/eclipse/paho.mqtt.golang"
 )
 
 const (
@@ -26,12 +26,12 @@ type Config struct {
 	DeviceId              string //如未设置clientId,则必填
 	KeepAlive             int64
 	ProtocolVersion       uint
-	DefaultPublishHandler *mqtt.MessageHandler
-	ConnectHandler        *mqtt.OnConnectHandler
-	ReconnectHandler      *mqtt.ReconnectHandler
-	ConnectLostHandler    *mqtt.ConnectionLostHandler
+	DefaultPublishHandler *pahomqtt.MessageHandler
+	ConnectHandler        *pahomqtt.OnConnectHandler
+	ReconnectHandler      *pahomqtt.ReconnectHandler
+	ConnectLostHandler    *pahomqtt.ConnectionLostHandler
 }
-type MessageHandler = mqtt.MessageHandler
+type MessageHandler = pahomqtt.MessageHandler
 type Client interface {
 	Disconnect(quiesce uint) //milliseconds
 	Publish(topic string, qos byte, retained bool, payload interface{}) error
@@ -41,7 +41,7 @@ type Client interface {
 	AddRoute(topic string, callback MessageHandler)
 }
 type clientEntity struct {
-	mqttClient mqtt.Client
+	mqttClient pahomqtt.Client
 	*Config
 }
 
@@ -53,7 +53,7 @@ func New(cfg *Config) (Client, error) {
 	if clientId == "" || username == "" || password == "" {
 		return nil, fmt.Errorf("clientId or username or password is empty")
 	}
-	opts := mqtt.NewClientOptions()
+	opts := pahomqtt.NewClientOptions()
 	opts.AddBroker(cfg.Endpoint)
 	opts.SetClientID(clientId)
 	opts.SetUsername(username) //暂时只支持签名授权
@@ -83,7 +83,7 @@ func New(cfg *Config) (Client, error) {
 		opts.KeepAlive = cfg.KeepAlive
 	}
 	//opts.SetProtocolVersion(util.If(cfg.ProtocolVersion > 0, cfg.ProtocolVersion, defaultProtocolVersion))
-	client.mqttClient = mqtt.NewClient(opts)
+	client.mqttClient = pahomqtt.NewClient(opts)
 	if token := client.mqttClient.Connect(); token.Wait() && token.Error() != nil {
 		return client, token.Error()
 	}
@@ -126,17 +126,17 @@ func (s *clientEntity) AddRoute(topic string, callback MessageHandler) {
 	s.mqttClient.AddRoute(topic, callback)
 }
 
-var defaultPublishHandler mqtt.MessageHandler = func(client mqtt.Client, msg mqtt.Message) {
+var defaultPublishHandler pahomqtt.MessageHandler = func(client pahomqtt.Client, msg pahomqtt.Message) {
 	//fmt.Printf("Received message: %s from topic: %s\n", msg.Payload(), msg.Topic())
 }
 
-var defaultConnectHandler mqtt.OnConnectHandler = func(client mqtt.Client) {
+var defaultConnectHandler pahomqtt.OnConnectHandler = func(client pahomqtt.Client) {
 	//fmt.Println("Connected")
 }
-var defaultReconnectHandler mqtt.ReconnectHandler = func(client mqtt.Client, options *mqtt.ClientOptions) {
+var defaultReconnectHandler pahomqtt.ReconnectHandler = func(client pahomqtt.Client, options *pahomqtt.ClientOptions) {
 	//fmt.Println("Reconnected")
 
 }
-var defaultConnectLostHandler mqtt.ConnectionLostHandler = func(client mqtt.Client, err error) {
+var defaultConnectLostHandler pahomqtt.ConnectionLostHandler = func(client pahomqtt.Client, err error) {
 	//fmt.Printf("Connect lost: %v", err)
 }
