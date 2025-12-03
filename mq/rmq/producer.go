@@ -190,12 +190,10 @@ func (p *producerEntity) Start() error {
 		// 超时后，尝试获取 SDK 内部的错误（如果有）
 		// 注意：超时后，SDK 内部的连接操作可能仍在进行
 		// 如果需要，可以调用 Close() 来清理资源
-		errMsg := fmt.Sprintf("启动 Producer 超时（超时时间: %v），可能网络不通或服务器不可达 (Endpoint: %s)", timeout, p.Endpoint)
-		// 如果 SDK 已经返回了错误，包含在超时错误中
 		if startErr != nil {
-			errMsg += fmt.Sprintf("，SDK 错误: %v", startErr)
+			return fmt.Errorf("启动 Producer 超时（超时时间: %v），可能网络不通或服务器不可达 (Endpoint: %s)，SDK 错误: %w", timeout, p.Endpoint, startErr)
 		}
-		return fmt.Errorf(errMsg)
+		return fmt.Errorf("启动 Producer 超时（超时时间: %v），可能网络不通或服务器不可达 (Endpoint: %s)", timeout, p.Endpoint)
 	}
 }
 
