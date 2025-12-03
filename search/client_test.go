@@ -2,11 +2,12 @@ package search_test
 
 import (
 	"fmt"
+	"testing"
+
 	teaUtil "github.com/alibabacloud-go/tea-utils/service"
 	"github.com/alibabacloud-go/tea/tea"
 	"github.com/bang-go/micro/search"
 	"github.com/bang-go/util"
-	"testing"
 )
 
 func TestClient(t *testing.T) {

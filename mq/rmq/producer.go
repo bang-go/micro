@@ -2,9 +2,10 @@ package rmq
 
 import (
 	"context"
+	"time"
+
 	rmqClient "github.com/apache/rocketmq-clients/golang/v5"
 	"github.com/apache/rocketmq-clients/golang/v5/credentials"
-	"time"
 )
 
 type RProducer = rmqClient.Producer

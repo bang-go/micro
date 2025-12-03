@@ -1,10 +1,10 @@
 package config_test
 
 import (
-	"github.com/bang-go/micro/config"
 	"log"
-	"os"
 	"testing"
+
+	"github.com/bang-go/micro/config"
 )
 
 func TestClientConfig(t *testing.T) {
@@ -23,7 +23,6 @@ func TestClientConfig(t *testing.T) {
 	}})
 	if err != nil {
 		log.Fatal(err)
-		os.Exit(1)
 	}
 	log.Println(client)
 	_, err = client.PublishConfig(config.Param{

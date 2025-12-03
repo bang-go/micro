@@ -2,9 +2,10 @@ package rmq_test
 
 import (
 	"context"
-	"github.com/bang-go/micro/mq/rmq"
 	"log"
 	"testing"
+
+	"github.com/bang-go/micro/mq/rmq"
 )
 
 func TestProducer(t *testing.T) {
@@ -19,7 +20,9 @@ func TestProducer(t *testing.T) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer p.Close()
+	defer func(p rmq.Producer) {
+		_ = p.Close()
+	}(p)
 	msg := &rmq.Message{Body: []byte(""), Topic: ""}
 	sendReceipt, err := p.SendNormalMessage(context.TODO(), msg)
 	if err != nil {

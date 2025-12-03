@@ -1,11 +1,12 @@
 package throttle_test
 
 import (
+	"sync"
+	"testing"
+
 	"github.com/alibaba/sentinel-golang/core/flow"
 	"github.com/alibaba/sentinel-golang/logging"
 	"github.com/bang-go/micro/throttle"
-	"sync"
-	"testing"
 )
 
 func TestFlow(t *testing.T) {

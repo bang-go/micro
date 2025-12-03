@@ -1,13 +1,14 @@
 package throttle
 
 import (
+	"log"
+
 	sentinelApi "github.com/alibaba/sentinel-golang/api"
 	"github.com/alibaba/sentinel-golang/core/circuitbreaker"
 	"github.com/alibaba/sentinel-golang/core/config"
 	"github.com/alibaba/sentinel-golang/logging"
 	"github.com/alibaba/sentinel-golang/util"
 	"github.com/bang-go/opt"
-	"log"
 )
 
 type breaker struct{}

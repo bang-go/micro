@@ -52,9 +52,9 @@ type SuggestItem struct {
 
 type ResponseSearchList[T any] struct {
 	Headers ResponseHeader `json:"headers"`
-	Body    SearchBody[T]  `json:"body"`
+	Body    Body[T]        `json:"body"`
 }
-type SearchBody[T any] struct {
+type Body[T any] struct {
 	Error          []ResponseError `json:"error"`
 	OpsRequestMisc string          `json:"ops_request_misc"`
 	RequestId      string          `json:"request_id"`

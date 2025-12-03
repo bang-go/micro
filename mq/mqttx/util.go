@@ -2,6 +2,7 @@ package mqttx
 
 import (
 	"fmt"
+
 	"github.com/bang-go/util/cipher"
 )
 

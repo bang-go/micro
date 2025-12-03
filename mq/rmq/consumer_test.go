@@ -2,10 +2,11 @@ package rmq_test
 
 import (
 	"context"
-	"github.com/bang-go/micro/mq/rmq"
 	"log"
 	"testing"
 	"time"
+
+	"github.com/bang-go/micro/mq/rmq"
 )
 
 func TestConsumer(t *testing.T) {
@@ -26,12 +27,14 @@ func TestConsumer(t *testing.T) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer c.Close()
+	defer func(c rmq.Consumer) {
+		_ = c.Close()
+	}(c)
 	for {
 		mvs, err := c.Receive()
 		if errRpcStatus, ok := rmq.AsErrRpcStatus(err); ok {
 			log.Println(errRpcStatus.GetCode(), errRpcStatus.GetMessage())
-			if errRpcStatus.GetCode() == int32(rmq.Code_MESSAGE_NOT_FOUND) {
+			if errRpcStatus.GetCode() == int32(rmq.CodeMessageNotFound) {
 				log.Println("no message")
 			}
 		}

@@ -1,12 +1,13 @@
 package throttle
 
 import (
+	"log"
+
 	sentinelApi "github.com/alibaba/sentinel-golang/api"
 	"github.com/alibaba/sentinel-golang/core/config"
 	"github.com/alibaba/sentinel-golang/core/flow"
 	"github.com/alibaba/sentinel-golang/logging"
 	"github.com/bang-go/opt"
-	"log"
 )
 
 type limiter struct{}

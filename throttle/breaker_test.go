@@ -2,13 +2,14 @@ package throttle_test
 
 import (
 	"errors"
-	"github.com/alibaba/sentinel-golang/core/circuitbreaker"
-	"github.com/alibaba/sentinel-golang/logging"
-	"github.com/bang-go/micro/throttle"
 	"math/rand"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/alibaba/sentinel-golang/core/circuitbreaker"
+	"github.com/alibaba/sentinel-golang/logging"
+	"github.com/bang-go/micro/throttle"
 )
 
 func TestErrorRatio(t *testing.T) {

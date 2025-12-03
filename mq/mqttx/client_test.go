@@ -2,10 +2,11 @@ package mqttx_test
 
 import (
 	"fmt"
-	"github.com/bang-go/micro/mq/mqttx"
-	mqtt "github.com/eclipse/paho.mqtt.golang"
 	"log"
 	"testing"
+
+	"github.com/bang-go/micro/mq/mqttx"
+	mqtt "github.com/eclipse/paho.mqtt.golang"
 )
 
 func TestClient(t *testing.T) {

@@ -3,11 +3,12 @@ package rmq
 import (
 	"context"
 	"errors"
+	"time"
+
 	rmqClient "github.com/apache/rocketmq-clients/golang/v5"
 	"github.com/apache/rocketmq-clients/golang/v5/credentials"
 	v2 "github.com/apache/rocketmq-clients/golang/v5/protocol/v2"
 	"github.com/bang-go/util"
-	"time"
 )
 
 const (
@@ -29,7 +30,7 @@ var NewFilterExpressionWithType = rmqClient.NewFilterExpressionWithType
 var SubAll = rmqClient.SUB_ALL
 
 const (
-	Code_MESSAGE_NOT_FOUND = v2.Code_MESSAGE_NOT_FOUND
+	CodeMessageNotFound = v2.Code_MESSAGE_NOT_FOUND
 )
 
 type Consumer interface {
@@ -78,8 +79,8 @@ func NewSimpleConsumer(conf *ConsumerConfig) (Consumer, error) {
 			AccessSecret: conf.SecretKey,
 		},
 	},
-		rmqClient.WithAwaitDuration(await),
-		rmqClient.WithSubscriptionExpressions(subscriptionExpressions),
+		rmqClient.WithSimpleAwaitDuration(await),
+		rmqClient.WithSimpleSubscriptionExpressions(subscriptionExpressions),
 	)
 	return consumer, err
 }
