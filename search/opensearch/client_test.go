@@ -1,4 +1,4 @@
-package search_test
+package opensearch_test
 
 import (
 	"fmt"
@@ -6,13 +6,13 @@ import (
 
 	teaUtil "github.com/alibabacloud-go/tea-utils/service"
 	"github.com/alibabacloud-go/tea/tea"
-	"github.com/bang-go/micro/search"
+	"github.com/bang-go/micro/search/opensearch"
 	"github.com/bang-go/util"
 )
 
 func TestClient(t *testing.T) {
 	var err error
-	client, err := search.NewClient(&search.Config{
+	client, err := opensearch.NewClient(&opensearch.Config{
 		Endpoint:        util.VarAddr(""),
 		AccessKeyId:     util.VarAddr(""),
 		AccessKeySecret: util.VarAddr("")})

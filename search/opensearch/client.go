@@ -1,4 +1,4 @@
-package search
+package opensearch
 
 import (
 	opensearchutil "github.com/alibabacloud-go/opensearch-util/service"
