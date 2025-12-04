@@ -42,7 +42,6 @@ const (
 	// 如果遇到连接问题，可以尝试增加到 30-60 秒
 	DefaultProducerStartTimeout = time.Second * 30
 	// DefaultDialTimeout 默认的 gRPC 连接超时时间
-	// 新版本 SDK (v5.1.3+) 默认连接超时为 5 秒，可能在某些网络环境下不够
 	// 如果遇到连接问题，可以尝试增加到 20-30 秒
 	DefaultDialTimeout = time.Second * 20
 )
@@ -61,7 +60,6 @@ type ProducerConfig struct {
 	// DialTimeout gRPC 连接建立的超时时间
 	// 如果为 0，则使用默认值 DefaultDialTimeout (20秒)
 	// 注意：这是 SDK 层面的连接超时，用于控制 gRPC Dial 操作的超时
-	// 新版本 SDK (v5.1.3+) 默认连接超时为 5 秒，可能在某些网络环境下不够
 	// 如果遇到连接问题，建议设置为 20-30 秒，应该小于或等于 StartTimeout
 	DialTimeout time.Duration
 	// MaxAttempts 消息发送的最大重试次数（默认 SDK 为 3）
@@ -73,13 +71,13 @@ type ProducerConfig struct {
 
 // NewProducer 创建新的生产者
 // conf: 生产者配置
-//   - StartTimeout: Start() 方法的超时时间，如果为 0 则使用默认值 10 秒
-//   - DialTimeout: gRPC 连接建立的超时时间，如果为 0 则使用默认值 10 秒
+//   - StartTimeout: Start() 方法的超时时间，如果为 0 则使用默认值 30 秒
+//   - DialTimeout: gRPC 连接建立的超时时间，如果为 0 则使用默认值 20 秒
 //
 // 返回: Producer 实例和错误
 // 使用示例：
 //
-//	// 使用默认超时（10秒）
+//	// 使用默认配置（超时 30/20 秒）
 //	producer, err := NewProducer(&ProducerConfig{
 //	    Endpoint:  "your-endpoint",
 //	    AccessKey: "your-key",
@@ -99,7 +97,7 @@ func NewProducer(conf *ProducerConfig) (Producer, error) {
 		return nil, errors.New("ProducerConfig 不能为 nil")
 	}
 	if conf.Endpoint == "" {
-		return nil, errors.New("Endpoint 不能为空")
+		return nil, errors.New("endpoint 不能为空")
 	}
 
 	producer := &producerEntity{ProducerConfig: conf}
@@ -120,11 +118,16 @@ func NewProducer(conf *ProducerConfig) (Producer, error) {
 	}
 
 	// 设置连接超时：通过 WithClientFunc 创建自定义客户端，使用 WithConnOptions 设置连接超时
-	// 新版本 SDK (v5.1.3+) 默认连接超时为 5 秒，可能在某些网络环境下不够
-	// 因此需要显式设置更长的连接超时时间
+	// 同时设置 QueryRouteTimeout，用于查询路由信息的超时
+	queryRouteTimeout := dialTimeout
+	if queryRouteTimeout > time.Second*10 {
+		queryRouteTimeout = time.Second * 10 // QueryRouteTimeout 不需要太长
+	}
 	opts = append(opts, rmqClient.WithClientFunc(func(config *rmqClient.Config, clientOpts ...rmqClient.ClientOption) (rmqClient.Client, error) {
 		// 添加连接超时选项
 		clientOpts = append(clientOpts, rmqClient.WithConnOptions(rmqClient.WithDialTimeout(dialTimeout)))
+		// 添加路由查询超时选项
+		clientOpts = append(clientOpts, rmqClient.WithQueryRouteTimeout(queryRouteTimeout))
 		return rmqClient.NewClient(config, clientOpts...)
 	}))
 

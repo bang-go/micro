@@ -10,7 +10,7 @@ require (
 	github.com/alibabacloud-go/opensearch-util v1.0.1
 	github.com/alibabacloud-go/tea-utils/v2 v2.0.8
 	github.com/aliyun/alibabacloud-oss-go-sdk-v2 v1.3.0
-	github.com/aliyun/credentials-go v1.4.5
+	github.com/aliyun/credentials-go v1.4.8
 	github.com/apache/rocketmq-clients/golang/v5 v5.1.2
 	github.com/bang-go/opt v0.0.2
 	github.com/bang-go/util v0.1.4

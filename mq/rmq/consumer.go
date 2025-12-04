@@ -74,7 +74,7 @@ type ConsumerConfig struct {
 // 返回: Consumer 实例和错误
 // 使用示例：
 //
-//	// 使用默认超时（10秒）
+//	// 使用默认配置（超时 10 秒）
 //	consumer, err := NewSimpleConsumer(&ConsumerConfig{
 //	    Group:     "your-group",
 //	    Endpoint:  "your-endpoint",
@@ -100,10 +100,11 @@ func NewSimpleConsumer(conf *ConsumerConfig) (Consumer, error) {
 		return nil, errors.New("ConsumerGroup 不能为空")
 	}
 	if conf.Endpoint == "" {
-		return nil, errors.New("Endpoint 不能为空")
+		return nil, errors.New("endpoint 不能为空")
 	}
 
 	consumer := &consumerEntity{ConsumerConfig: conf}
+
 	await := util.If(conf.AwaitDuration > 0, conf.AwaitDuration, DefaultConsumerAwaitDuration)
 
 	var subscriptionExpressions map[string]*FilterExpression
