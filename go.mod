@@ -14,6 +14,7 @@ require (
 	github.com/apache/rocketmq-clients/golang/v5 v5.1.2
 	github.com/bang-go/opt v0.0.2
 	github.com/bang-go/util v0.1.4
+	github.com/coder/websocket v1.8.14
 	github.com/eclipse/paho.mqtt.golang v1.5.1
 	github.com/elastic/go-elasticsearch/v9 v9.2.0
 	github.com/gin-gonic/gin v1.11.0
@@ -40,6 +41,7 @@ require (
 	github.com/clbanning/mxj/v2 v2.7.0 // indirect
 	github.com/cloudwego/base64x v0.1.6 // indirect
 	github.com/deckarep/golang-set v1.8.0 // indirect
+	github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f // indirect
 	github.com/elastic/elastic-transport-go/v8 v8.7.0 // indirect
 	github.com/gabriel-vasile/mimetype v1.4.11 // indirect
 	github.com/gin-contrib/sse v1.1.0 // indirect
@@ -60,6 +62,7 @@ require (
 	github.com/power-devops/perfstat v0.0.0-20240221224432-82ca36839d55 // indirect
 	github.com/quic-go/qpack v0.6.0 // indirect
 	github.com/quic-go/quic-go v0.57.1 // indirect
+	github.com/redis/go-redis/v9 v9.17.2 // indirect
 	github.com/shoenig/go-m1cpu v0.1.7 // indirect
 	github.com/tjfoc/gmsm v1.4.1 // indirect
 	github.com/twitchyliquid64/golang-asm v0.15.1 // indirect
