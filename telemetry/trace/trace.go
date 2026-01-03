@@ -4,7 +4,6 @@ import (
 	"context"
 	"os"
 
-	"github.com/bang-go/micro/telemetry/logger"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/exporters/stdout/stdouttrace"
@@ -85,8 +84,6 @@ func InitTracer(ctx context.Context, conf *Config) (func(context.Context) error,
 		propagation.TraceContext{},
 		propagation.Baggage{},
 	))
-
-	logger.New().Info(context.Background(), "trace_initialized", "service", conf.ServiceName, "exporter", conf.Exporter)
 
 	return tp.Shutdown, nil
 }
