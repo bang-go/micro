@@ -73,7 +73,16 @@ func New(conf *ServerConfig) Server {
 
 	// 0. Trace (OpenTelemetry) - Must be first to start span
 	if conf.Trace {
-		ginEngine.Use(otelgin.Middleware(util.If(conf.ServiceName != "", conf.ServiceName, "unknown-service")))
+		ginEngine.Use(otelgin.Middleware(
+			util.If(conf.ServiceName != "", conf.ServiceName, "unknown-service"),
+			otelgin.WithFilter(func(r *http.Request) bool {
+				// Filter out health check and metrics
+				if r.URL.Path == "/healthz" || r.URL.Path == "/metrics" {
+					return false
+				}
+				return true
+			}),
+		))
 	}
 	// 1. Recovery with logger
 	ginEngine.Use(middleware.RecoveryMiddleware(conf.Logger, true))

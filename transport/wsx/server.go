@@ -6,6 +6,7 @@ import (
 
 	"github.com/bang-go/opt"
 	"github.com/coder/websocket"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
 type Server interface {
@@ -50,8 +51,15 @@ func (s *serverEntity) Start(handler func(Connect)) error {
 	})
 
 	s.server = &http.Server{
-		Addr:    s.config.Addr,
-		Handler: mux,
+		Addr: s.config.Addr,
+		Handler: otelhttp.NewHandler(mux, "wsx",
+			otelhttp.WithFilter(func(r *http.Request) bool {
+				if r.URL.Path == "/healthz" || r.URL.Path == "/metrics" {
+					return false
+				}
+				return true
+			}),
+		),
 	}
 	return s.server.ListenAndServe()
 }

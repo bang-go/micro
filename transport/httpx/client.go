@@ -14,11 +14,11 @@ import (
 )
 
 const (
-	ContentRaw     = "Raw"            //原始请求
-	ContentForm    = "Form"           //Form请求
-	ContentJson    = "Json"           //Json请求
-	DefaultTimeout = 30 * time.Second //默认请求时间
+	ContentRaw  = "Raw"  //原始请求
+	ContentForm = "Form" //Form请求
+	ContentJson = "Json" //Json请求
 )
+
 const (
 	MethodGet     = http.MethodGet
 	MethodHead    = http.MethodHead
@@ -56,22 +56,6 @@ func init() {
 	prometheus.MustRegister(ClientRequestsTotal)
 }
 
-type Config struct {
-	Timeout      time.Duration
-	Trace        bool
-	Logger       *logger.Logger
-	EnableLogger bool
-	// Connection Pool Settings
-	MaxIdleConns        int
-	MaxIdleConnsPerHost int
-	MaxConnsPerHost     int
-	IdleConnTimeout     time.Duration
-
-	// Custom Transport (Optional)
-	// If set, Connection Pool Settings above will be ignored for this transport
-	Transport *http.Transport
-}
-
 type Client interface {
 	Send(ctx context.Context, req *Request, opts ...opt.Option[requestOptions]) (resp *Response, err error)
 }
@@ -85,7 +69,7 @@ func New(conf *Config) Client {
 	if conf == nil {
 		conf = &Config{}
 	}
-	if conf.Logger == nil {
+	if conf.Logger == nil && conf.EnableLogger {
 		conf.Logger = logger.New(logger.WithLevel("info"))
 	}
 
@@ -123,7 +107,7 @@ func New(conf *Config) Client {
 		}
 	}
 
-	timeout := DefaultTimeout
+	timeout := 30 * time.Second
 	if conf.Timeout > 0 {
 		timeout = conf.Timeout
 	}

@@ -121,7 +121,14 @@ func (s *ServerEntity) Start(register ServerRegisterFunc) (err error) {
 	baseOptions := []grpc.ServerOption{grpc.KeepaliveEnforcementPolicy(defaultServerKeepaliveEnforcementPolicy), grpc.KeepaliveParams(defaultServerKeepaliveParams)}
 	if s.Trace {
 		// Trace StatsHandler
-		baseOptions = append(baseOptions, grpc.StatsHandler(otelgrpc.NewServerHandler()))
+		baseOptions = append(baseOptions, grpc.StatsHandler(otelgrpc.NewServerHandler(
+			otelgrpc.WithInterceptorFilter(func(info *otelgrpc.InterceptorInfo) bool {
+				if info.Method == "/grpc.health.v1.Health/Check" || info.Method == "/grpc.health.v1.Health/Watch" {
+					return false
+				}
+				return true
+			}),
+		)))
 	}
 
 	s.serverOptions = append(baseOptions, s.serverOptions...)
