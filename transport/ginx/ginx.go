@@ -80,7 +80,9 @@ func New(conf *ServerConfig) Server {
 	// 2. Metrics (Prometheus)
 	ginEngine.Use(middleware.MetricMiddleware())
 	// 3. Access Logger
-	ginEngine.Use(middleware.LoggerMiddleware(conf.Logger))
+	if conf.EnableLogger {
+		ginEngine.Use(middleware.LoggerMiddleware(conf.Logger))
+	}
 
 	// Default Health Check Route
 	ginEngine.GET("/healthz", func(c *gin.Context) {
