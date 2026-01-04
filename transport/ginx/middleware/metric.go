@@ -27,28 +27,40 @@ var (
 		},
 		[]string{"method", "path", "status"},
 	)
+	// RequestInFlight 记录当前并发请求数
+	RequestInFlight = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "http_server_requests_in_flight",
+			Help: "HTTP server requests currently processing",
+		},
+		[]string{"method", "path"},
+	)
 )
 
 func init() {
 	// Register metrics
 	prometheus.MustRegister(RequestDurationHistogram)
 	prometheus.MustRegister(RequestCounter)
+	prometheus.MustRegister(RequestInFlight)
 }
 
 // MetricMiddleware returns a gin.HandlerFunc (middleware) that records metrics
 func MetricMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		start := time.Now()
+		method := c.Request.Method
+		path := c.FullPath()
+		if path == "" {
+			path = "unknown"
+		}
+
+		RequestInFlight.WithLabelValues(method, path).Inc()
+		defer RequestInFlight.WithLabelValues(method, path).Dec()
 
 		c.Next()
 
 		duration := time.Since(start).Seconds()
 		status := strconv.Itoa(c.Writer.Status())
-		method := c.Request.Method
-		path := c.FullPath() // 使用 FullPath 避免 URL 参数导致的高基数问题
-		if path == "" {
-			path = "unknown"
-		}
 
 		RequestDurationHistogram.WithLabelValues(method, path, status).Observe(duration)
 		RequestCounter.WithLabelValues(method, path, status).Inc()
