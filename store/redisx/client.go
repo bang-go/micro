@@ -2,6 +2,7 @@ package redisx
 
 import (
 	"context"
+	"errors"
 	"net"
 	"time"
 
@@ -44,6 +45,7 @@ type Config struct {
 	DialTimeout  time.Duration
 	ReadTimeout  time.Duration
 	WriteTimeout time.Duration
+	Protocol     int
 
 	Trace        bool
 	Logger       *logger.Logger
@@ -67,6 +69,7 @@ func New(conf *Config) *redis.Client {
 		DialTimeout:  conf.DialTimeout,
 		ReadTimeout:  conf.ReadTimeout,
 		WriteTimeout: conf.WriteTimeout,
+		Protocol:     conf.Protocol,
 	}
 
 	// Default timeouts if not set
@@ -117,7 +120,7 @@ func (h *hook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
 		duration := time.Since(start).Seconds()
 
 		status := "success"
-		if err != nil && err != redis.Nil {
+		if err != nil && !errors.Is(err, redis.Nil) {
 			status = "error"
 		}
 
@@ -127,7 +130,7 @@ func (h *hook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
 
 		// Logging
 		if h.enableLogger {
-			if err != nil && err != redis.Nil {
+			if err != nil && !errors.Is(err, redis.Nil) {
 				h.logger.Error(ctx, "redis_command_failed",
 					"addr", h.addr,
 					"command", cmd.Name(),
@@ -159,7 +162,7 @@ func (h *hook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.Process
 		duration := time.Since(start).Seconds()
 
 		status := "success"
-		if err != nil && err != redis.Nil {
+		if err != nil && !errors.Is(err, redis.Nil) {
 			status = "error"
 		}
 
@@ -169,7 +172,7 @@ func (h *hook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.Process
 
 		// Logging
 		if h.enableLogger {
-			if err != nil && err != redis.Nil {
+			if err != nil && !errors.Is(err, redis.Nil) {
 				h.logger.Error(ctx, "redis_pipeline_failed",
 					"addr", h.addr,
 					"count", len(cmds),
