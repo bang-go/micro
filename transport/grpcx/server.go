@@ -14,6 +14,7 @@ import (
 	"google.golang.org/grpc/health"
 	"google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/keepalive"
+	"google.golang.org/grpc/stats"
 )
 
 type Server interface {
@@ -122,8 +123,8 @@ func (s *ServerEntity) Start(register ServerRegisterFunc) (err error) {
 	if s.Trace {
 		// Trace StatsHandler
 		baseOptions = append(baseOptions, grpc.StatsHandler(otelgrpc.NewServerHandler(
-			otelgrpc.WithInterceptorFilter(func(info *otelgrpc.InterceptorInfo) bool {
-				if info.Method == "/grpc.health.v1.Health/Check" || info.Method == "/grpc.health.v1.Health/Watch" {
+			otelgrpc.WithFilter(func(info *stats.RPCTagInfo) bool {
+				if info.FullMethodName == "/grpc.health.v1.Health/Check" || info.FullMethodName == "/grpc.health.v1.Health/Watch" {
 					return false
 				}
 				return true
