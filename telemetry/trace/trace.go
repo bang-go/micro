@@ -2,10 +2,14 @@ package trace
 
 import (
 	"context"
+	"net/url"
 	"os"
+	"strings"
+	"time"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	"go.opentelemetry.io/otel/exporters/stdout/stdouttrace"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/resource"
@@ -15,9 +19,12 @@ import (
 
 type Config struct {
 	ServiceName string
-	Endpoint    string // e.g., "localhost:4317"
+	Endpoint    string // e.g., "localhost:4317" or "https://host/path"
 	Exporter    string // "otlp" or "stdout" (default: "stdout")
 	SampleRate  float64
+	Headers     map[string]string // Authorization headers
+	Compression string            // "gzip"
+	Timeout     time.Duration
 }
 
 // InitTracer initializes the global OpenTelemetry tracer provider.
@@ -34,11 +41,60 @@ func InitTracer(ctx context.Context, conf *Config) (func(context.Context) error,
 	var err error
 
 	if conf.Exporter == "otlp" {
-		// OTLP gRPC exporter
-		exporter, err = otlptracegrpc.New(ctx,
-			otlptracegrpc.WithEndpoint(conf.Endpoint),
-			otlptracegrpc.WithInsecure(), // In production, consider TLS
-		)
+		// Detect protocol from Endpoint scheme
+		endpoint := conf.Endpoint
+		isHTTP := strings.HasPrefix(endpoint, "http://") || strings.HasPrefix(endpoint, "https://")
+
+		if isHTTP {
+			// HTTP Exporter
+			u, parseErr := url.Parse(endpoint)
+			if parseErr != nil {
+				return nil, parseErr
+			}
+
+			opts := []otlptracehttp.Option{
+				otlptracehttp.WithEndpoint(u.Host),
+				otlptracehttp.WithURLPath(u.Path),
+			}
+
+			if u.Scheme == "http" {
+				opts = append(opts, otlptracehttp.WithInsecure())
+			}
+
+			if len(conf.Headers) > 0 {
+				opts = append(opts, otlptracehttp.WithHeaders(conf.Headers))
+			}
+
+			if conf.Compression == "gzip" {
+				opts = append(opts, otlptracehttp.WithCompression(otlptracehttp.GzipCompression))
+			}
+
+			if conf.Timeout > 0 {
+				opts = append(opts, otlptracehttp.WithTimeout(conf.Timeout))
+			}
+
+			exporter, err = otlptracehttp.New(ctx, opts...)
+		} else {
+			// gRPC Exporter (Default)
+			opts := []otlptracegrpc.Option{
+				otlptracegrpc.WithEndpoint(endpoint),
+				otlptracegrpc.WithInsecure(), // Default to insecure for gRPC to match previous behavior
+			}
+
+			if len(conf.Headers) > 0 {
+				opts = append(opts, otlptracegrpc.WithHeaders(conf.Headers))
+			}
+
+			if conf.Compression == "gzip" {
+				opts = append(opts, otlptracegrpc.WithCompressor("gzip"))
+			}
+
+			if conf.Timeout > 0 {
+				opts = append(opts, otlptracegrpc.WithTimeout(conf.Timeout))
+			}
+
+			exporter, err = otlptracegrpc.New(ctx, opts...)
+		}
 	} else {
 		// Stdout exporter (useful for dev/debug)
 		exporter, err = stdouttrace.New(
