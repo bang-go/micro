@@ -41,7 +41,14 @@ func NewServer(conf *ServerConfig, opts ...opt.Option[serverOptions]) Server {
 
 func (s *serverEntity) Start(handler func(Connect)) error {
 	mux := http.NewServeMux()
+	// WebSocket Route
 	mux.HandleFunc(s.options.path, s.Handler(handler))
+	// Health Check Route
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("OK"))
+	})
+
 	s.server = &http.Server{
 		Addr:    s.config.Addr,
 		Handler: mux,

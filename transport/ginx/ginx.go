@@ -82,6 +82,11 @@ func New(conf *ServerConfig) Server {
 	// 3. Access Logger
 	ginEngine.Use(middleware.LoggerMiddleware(conf.Logger))
 
+	// Default Health Check Route
+	ginEngine.GET("/healthz", func(c *gin.Context) {
+		c.String(http.StatusOK, "OK")
+	})
+
 	return &ServerEntity{
 		ServerConfig: conf,
 		ginEngine:    ginEngine,

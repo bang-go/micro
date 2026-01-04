@@ -11,6 +11,8 @@ import (
 	server_interceptor "github.com/bang-go/micro/transport/grpcx/server_interceptor"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/health"
+	"google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/keepalive"
 )
 
@@ -29,6 +31,7 @@ type ServerEntity struct {
 	streamInterceptors []grpc.StreamServerInterceptor
 	unaryInterceptors  []grpc.UnaryServerInterceptor
 	grpcServer         *grpc.Server
+	healthServer       *health.Server
 }
 
 type ServerRegisterFunc func(*grpc.Server)
@@ -124,6 +127,12 @@ func (s *ServerEntity) Start(register ServerRegisterFunc) (err error) {
 	s.serverOptions = append(baseOptions, s.serverOptions...)
 	options := append(s.serverOptions, grpc.ChainUnaryInterceptor(s.unaryInterceptors...), grpc.ChainStreamInterceptor(s.streamInterceptors...))
 	s.grpcServer = grpc.NewServer(options...)
+
+	// Health Check
+	s.healthServer = health.NewServer()
+	grpc_health_v1.RegisterHealthServer(s.grpcServer, s.healthServer)
+	s.healthServer.SetServingStatus("", grpc_health_v1.HealthCheckResponse_SERVING)
+
 	register(s.grpcServer)
 
 	//注册优雅退出 future
@@ -136,6 +145,9 @@ func (s *ServerEntity) Engine() *grpc.Server {
 }
 
 func (s *ServerEntity) Shutdown() error {
+	if s.healthServer != nil {
+		s.healthServer.SetServingStatus("", grpc_health_v1.HealthCheckResponse_NOT_SERVING)
+	}
 	if s.grpcServer != nil {
 		s.grpcServer.GracefulStop()
 		s.grpcServer = nil
