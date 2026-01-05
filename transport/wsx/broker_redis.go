@@ -24,6 +24,12 @@ func NewRedisBroker(addr string, password string, db int) *RedisBroker {
 	}
 }
 
+func NewRedisBrokerWithClient(client *redis.Client) *RedisBroker {
+	return &RedisBroker{
+		client: client,
+	}
+}
+
 func (b *RedisBroker) Subscribe(ctx context.Context, channel string, handler func(msg []byte)) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
