@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bang-go/micro/pkg/pool"
 	"github.com/bang-go/micro/telemetry/logger"
 	"github.com/prometheus/client_golang/prometheus"
 	"go.opentelemetry.io/otel"
@@ -70,7 +71,7 @@ type Server interface {
 type ServerConfig struct {
 	Addr         string
 	Timeout      time.Duration // Idle timeout for connections
-	MaxConns     int           // Max concurrent connections
+	MaxConns     int           // Max concurrent connections. If > 0, connection pool is used.
 	Trace        bool
 	Logger       *logger.Logger
 	EnableLogger bool
@@ -83,6 +84,7 @@ type serverEntity struct {
 	isRunning    bool
 	mu           sync.Mutex
 	wg           sync.WaitGroup // For graceful shutdown
+	workerPool   pool.Pool      // Optional worker pool for connections
 	interceptors []Interceptor
 }
 
@@ -94,7 +96,7 @@ func NewServer(conf *ServerConfig) Server {
 		conf.Logger = logger.New(logger.WithLevel("info"))
 	}
 	if conf.MaxConns <= 0 {
-		conf.MaxConns = 10000 // Default max connections
+		conf.MaxConns = 10000 // Default max connections if used for pool
 	}
 
 	return &serverEntity{
@@ -126,6 +128,19 @@ func (s *serverEntity) Start(handler Handler) (err error) {
 		return err
 	}
 
+	// Initialize Worker Pool if MaxConns > 0 (effectively always true with default)
+	// We use NonBlocking=false by default (Accept blocks when pool full),
+	// but standard TCP server usually accepts and closes if full, or blocks Accept.
+	// Blocking Accept is fine as it applies backpressure to OS backlog.
+	s.workerPool, err = pool.New(s.config.MaxConns,
+		pool.WithLogger(s.config.Logger),
+		pool.WithQueueSize(0), // Unbuffered? No, pool uses buffered chan as queue. Size 0 defaults to capacity.
+	)
+	if err != nil {
+		s.mu.Unlock()
+		return err
+	}
+
 	s.isRunning = true
 	stopCh := s.stopCh
 	s.mu.Unlock()
@@ -151,13 +166,6 @@ func (s *serverEntity) Start(handler Handler) (err error) {
 		case <-stopCh:
 			return nil
 		default:
-			// Set deadline to allow checking stopCh periodically if Accept blocks
-			// Note: This is a tradeoff. A better way is closing the listener.
-			// But here we want to support Shutdown logic.
-			// Actually, just closing listener in Shutdown is standard in Go.
-			// So we won't set SetDeadline on listener here to avoid busy loop if we rely on it.
-			// We rely on Shutdown closing the listener to break this loop.
-
 			conn, err := s.listen.Accept()
 			if err != nil {
 				if opErr, ok := err.(*net.OpError); ok && !opErr.Temporary() {
@@ -183,11 +191,18 @@ func (s *serverEntity) Start(handler Handler) (err error) {
 			}
 			tempDelay = 0
 
-			s.wg.Add(1)
-			go func(c net.Conn) {
-				defer s.wg.Done()
-				s.handleConn(c, finalHandler, tracer)
-			}(conn)
+			// Dispatch to pool
+			// Accept blocks if pool is full.
+			// This is good for backpressure.
+			err = s.workerPool.Submit(func() {
+				s.handleConn(conn, finalHandler, tracer)
+			})
+
+			if err != nil {
+				// Pool closed or error
+				s.config.Logger.Error(context.Background(), "tcpx_submit_error", "error", err)
+				conn.Close() // Close connection if cannot submit
+			}
 		}
 	}
 }
@@ -215,9 +230,9 @@ func (s *serverEntity) handleConn(conn net.Conn, handler Handler, tracer trace.T
 	wrappedConn := NewConnect(conn, WithConnectTimeout(s.config.Timeout))
 
 	defer func() {
-		if r := recover(); r != nil {
-			s.config.Logger.Error(ctx, "tcpx_panic_recovered", "error", r)
-		}
+		// Panic recovery is done by pool, but we need to ensure conn is closed.
+		// Pool recovers panic, but doesn't know about cleanup like Close().
+		// So we MUST keep this defer for cleanup.
 		wrappedConn.Close()
 	}()
 
@@ -252,15 +267,17 @@ func (s *serverEntity) Shutdown(ctx context.Context) error {
 	}
 	s.mu.Unlock()
 
-	// Wait for active connections
-	c := make(chan struct{})
+	// Wait for pool
+	done := make(chan struct{})
 	go func() {
-		s.wg.Wait()
-		close(c)
+		if s.workerPool != nil {
+			s.workerPool.Release()
+		}
+		close(done)
 	}()
 
 	select {
-	case <-c:
+	case <-done:
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()

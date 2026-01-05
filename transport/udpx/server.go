@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bang-go/micro/pkg/pool"
 	"github.com/bang-go/micro/telemetry/logger"
 	"github.com/prometheus/client_golang/prometheus"
 	"go.opentelemetry.io/otel"
@@ -75,7 +76,7 @@ type serverEntity struct {
 	stopCh       chan struct{}
 	isRunning    bool
 	mu           sync.Mutex
-	wg           sync.WaitGroup
+	workerPool   pool.Pool
 	interceptors []Interceptor
 }
 
@@ -135,6 +136,16 @@ func (s *serverEntity) Start(handler Handler) (err error) {
 		}
 	}
 
+	// Initialize Worker Pool
+	s.workerPool, err = pool.New(s.config.Workers,
+		pool.WithLogger(s.config.Logger),
+		pool.WithQueueSize(s.config.Workers*100), // Keep the original buffer size ratio
+	)
+	if err != nil {
+		s.mu.Unlock()
+		return err
+	}
+
 	s.isRunning = true
 	stopCh := s.stopCh
 	s.mu.Unlock()
@@ -153,20 +164,6 @@ func (s *serverEntity) Start(handler Handler) (err error) {
 
 	tracer := otel.Tracer("micro/udpx")
 
-	// Worker Pool pattern for packet processing
-	packetCh := make(chan packetData, s.config.Workers*100)
-
-	// Start workers
-	for i := 0; i < s.config.Workers; i++ {
-		s.wg.Add(1)
-		go func() {
-			defer s.wg.Done()
-			for data := range packetCh {
-				s.handlePacket(data, finalHandler, tracer)
-			}
-		}()
-	}
-
 	// Reader Loop
 	bufPool := sync.Pool{
 		New: func() interface{} {
@@ -177,7 +174,6 @@ func (s *serverEntity) Start(handler Handler) (err error) {
 	for {
 		select {
 		case <-stopCh:
-			close(packetCh)
 			return nil
 		default:
 			// Read packet
@@ -187,7 +183,6 @@ func (s *serverEntity) Start(handler Handler) (err error) {
 				// If closed
 				select {
 				case <-stopCh:
-					close(packetCh)
 					return nil
 				default:
 					s.config.Logger.Error(context.Background(), "udpx_read_error", "error", err)
@@ -196,19 +191,22 @@ func (s *serverEntity) Start(handler Handler) (err error) {
 			}
 
 			// Copy data to avoid race condition if buffer is reused too quickly
-			// Or we can just pass the buffer and let worker return it to pool?
-			// To be safe and simple, we copy effective bytes.
-			// For high perf, zero-copy techniques needed (e.g. specialized buffer pool).
 			payload := make([]byte, n)
 			copy(payload, buf[:n])
 			bufPool.Put(buf) // Return original buffer immediately
 
-			// Dispatch
-			// Non-blocking send if channel full? Or blocking?
-			// Blocking provides backpressure.
-			packetCh <- packetData{
+			pData := packetData{
 				data: payload,
 				addr: remoteAddr,
+			}
+
+			// Dispatch to worker pool
+			err = s.workerPool.Submit(func() {
+				s.handlePacket(pData, finalHandler, tracer)
+			})
+			if err != nil {
+				// Pool full or closed
+				s.config.Logger.Error(context.Background(), "udpx_submit_error", "error", err)
 			}
 		}
 	}
@@ -238,12 +236,6 @@ func (s *serverEntity) handlePacket(p packetData, handler Handler, tracer trace.
 
 	start := time.Now()
 
-	defer func() {
-		if r := recover(); r != nil {
-			s.config.Logger.Error(ctx, "udpx_panic_recovered", "error", r)
-		}
-	}()
-
 	err := handler.Handle(ctx, p.data, p.addr, s.conn)
 	duration := time.Since(start)
 
@@ -268,17 +260,30 @@ func (s *serverEntity) Shutdown(ctx context.Context) error {
 	if s.conn != nil {
 		s.conn.Close()
 	}
+
+	// Release worker pool
+	if s.workerPool != nil {
+		go s.workerPool.Release() // Async release to avoid blocking lock?
+		// No, Release waits. We should probably wait outside lock?
+		// Yes.
+	}
 	s.mu.Unlock()
 
-	// Wait for workers
-	c := make(chan struct{})
+	// Wait for workers via pool release (which waits for wg)
+	// But we need to support context cancellation.
+	// pool.Release() is blocking and doesn't take context.
+	// We can wrap it.
+
+	done := make(chan struct{})
 	go func() {
-		s.wg.Wait()
-		close(c)
+		if s.workerPool != nil {
+			s.workerPool.Release()
+		}
+		close(done)
 	}()
 
 	select {
-	case <-c:
+	case <-done:
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
