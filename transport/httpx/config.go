@@ -22,6 +22,10 @@ type Config struct {
 	IdleConnTimeout     time.Duration
 	Transport           *http.Transport
 
+	// ObservabilitySkipPaths 跳过可观测性记录（Metrics & Trace）的路径列表
+	// 客户端无默认值，完全由用户配置。
+	ObservabilitySkipPaths []string
+
 	// Server specific settings
 	Addr         string
 	ReadTimeout  time.Duration

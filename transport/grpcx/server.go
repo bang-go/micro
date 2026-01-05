@@ -42,9 +42,11 @@ type ServerConfig struct {
 	Logger       *logger.Logger
 	EnableLogger bool
 	//TraceFilter grpctrace.Filter
-}
 
-// todo: trace，retry
+	// ObservabilitySkipMethods 跳过可观测性记录（Metrics & Trace）的方法列表
+	// 默认为 /grpc.health.v1.Health/Check, /grpc.health.v1.Health/Watch。用户配置将与默认值合并。
+	ObservabilitySkipMethods []string
+}
 
 func NewServer(conf *ServerConfig) Server {
 	if conf == nil {
@@ -54,6 +56,10 @@ func NewServer(conf *ServerConfig) Server {
 		conf.Logger = logger.New(logger.WithLevel("info"))
 	}
 
+	// Prepare Skip Methods (Default + User Config)
+	skipMethods := []string{"/grpc.health.v1.Health/Check", "/grpc.health.v1.Health/Watch"}
+	skipMethods = append(skipMethods, conf.ObservabilitySkipMethods...)
+
 	// Default Interceptors for Enterprise Production
 	unaryInterceptors := []grpc.UnaryServerInterceptor{
 		// 1. Recovery
@@ -61,7 +67,7 @@ func NewServer(conf *ServerConfig) Server {
 			conf.Logger.Error(ctx, "[Recovery from panic]", "error", p, "stack", string(debug.Stack()))
 		}),
 		// 2. Metrics
-		server_interceptor.UnaryServerMetricInterceptor(),
+		server_interceptor.UnaryServerMetricInterceptor(skipMethods...),
 	}
 	// 3. Access Logger
 	if conf.EnableLogger {
@@ -74,7 +80,7 @@ func NewServer(conf *ServerConfig) Server {
 			conf.Logger.Error(ctx, "[Recovery from panic]", "error", p, "stack", string(debug.Stack()))
 		}),
 		// 2. Metrics
-		server_interceptor.StreamServerMetricInterceptor(),
+		server_interceptor.StreamServerMetricInterceptor(skipMethods...),
 	}
 	// 3. Access Logger
 	if conf.EnableLogger {
@@ -121,11 +127,17 @@ func (s *ServerEntity) Start(register ServerRegisterFunc) (err error) {
 	}
 	baseOptions := []grpc.ServerOption{grpc.KeepaliveEnforcementPolicy(defaultServerKeepaliveEnforcementPolicy), grpc.KeepaliveParams(defaultServerKeepaliveParams)}
 	if s.Trace {
+		// Prepare Skip Methods (Default + User Config)
+		skipMethods := []string{"/grpc.health.v1.Health/Check", "/grpc.health.v1.Health/Watch"}
+		skipMethods = append(skipMethods, s.ObservabilitySkipMethods...)
+
 		// Trace StatsHandler
 		baseOptions = append(baseOptions, grpc.StatsHandler(otelgrpc.NewServerHandler(
 			otelgrpc.WithFilter(func(info *stats.RPCTagInfo) bool {
-				if info.FullMethodName == "/grpc.health.v1.Health/Check" || info.FullMethodName == "/grpc.health.v1.Health/Watch" {
-					return false
+				for _, m := range skipMethods {
+					if info.FullMethodName == m {
+						return false
+					}
 				}
 				return true
 			}),

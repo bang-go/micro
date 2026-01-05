@@ -118,7 +118,16 @@ func New(conf *Config) Client {
 	}
 
 	if conf.Trace {
-		httpClient.Transport = otelhttp.NewTransport(transport)
+		httpClient.Transport = otelhttp.NewTransport(transport,
+			otelhttp.WithFilter(func(r *http.Request) bool {
+				for _, p := range conf.ObservabilitySkipPaths {
+					if r.URL.Path == p {
+						return false
+					}
+				}
+				return true
+			}),
+		)
 	}
 
 	return &clientEntity{
@@ -177,8 +186,19 @@ func (c clientEntity) Send(ctx context.Context, req *Request, opts ...opt.Option
 	code := httpRes.StatusCode
 
 	// Metrics
-	ClientRequestDuration.WithLabelValues(method, http.StatusText(code), host).Observe(elapsed)
-	ClientRequestsTotal.WithLabelValues(method, http.StatusText(code), host).Inc()
+	// Check skip paths
+	shouldRecordMetric := true
+	for _, p := range c.config.ObservabilitySkipPaths {
+		if httpReq.URL.Path == p {
+			shouldRecordMetric = false
+			break
+		}
+	}
+
+	if shouldRecordMetric {
+		ClientRequestDuration.WithLabelValues(method, http.StatusText(code), host).Observe(elapsed)
+		ClientRequestsTotal.WithLabelValues(method, http.StatusText(code), host).Inc()
+	}
 
 	// Logging
 	if c.config.EnableLogger {

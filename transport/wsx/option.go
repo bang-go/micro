@@ -14,6 +14,7 @@ type connectOptions struct {
 	readTimeout       time.Duration
 	writeTimeout      time.Duration
 	sendBufferSize    int
+	skipObservability bool
 }
 
 func WithHeartbeatInterval(d time.Duration) opt.Option[connectOptions] {
@@ -37,6 +38,12 @@ func WithWriteTimeout(d time.Duration) opt.Option[connectOptions] {
 func WithSendBufferSize(size int) opt.Option[connectOptions] {
 	return opt.OptionFunc[connectOptions](func(o *connectOptions) {
 		o.sendBufferSize = size
+	})
+}
+
+func WithSkipObservability(skip bool) opt.Option[connectOptions] {
+	return opt.OptionFunc[connectOptions](func(o *connectOptions) {
+		o.skipObservability = skip
 	})
 }
 

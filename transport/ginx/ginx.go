@@ -34,6 +34,10 @@ type ServerConfig struct {
 	ReadTimeout  time.Duration
 	WriteTimeout time.Duration
 	IdleTimeout  time.Duration
+
+	// ObservabilitySkipPaths 跳过可观测性记录（Metrics & Trace）的路径列表
+	// 默认为 /healthz, /metrics, /favicon.ico。用户配置将与默认值合并。
+	ObservabilitySkipPaths []string
 }
 
 type ServerEntity struct {
@@ -71,14 +75,21 @@ func New(conf *ServerConfig) Server {
 
 	ginEngine := gin.New()
 
+	// Prepare Skip Paths (Default + User Config)
+	skipPaths := []string{"/healthz", "/metrics", "/favicon.ico"}
+	skipPaths = append(skipPaths, conf.ObservabilitySkipPaths...)
+	// Deduplicate if needed, but not strictly necessary for functionality
+
 	// 0. Trace (OpenTelemetry) - Must be first to start span
 	if conf.Trace {
 		ginEngine.Use(otelgin.Middleware(
 			util.If(conf.ServiceName != "", conf.ServiceName, "unknown-service"),
 			otelgin.WithFilter(func(r *http.Request) bool {
-				// Filter out health check and metrics
-				if r.URL.Path == "/healthz" || r.URL.Path == "/metrics" {
-					return false
+				// Filter out skip paths
+				for _, p := range skipPaths {
+					if r.URL.Path == p {
+						return false
+					}
 				}
 				return true
 			}),
@@ -87,7 +98,7 @@ func New(conf *ServerConfig) Server {
 	// 1. Recovery with logger
 	ginEngine.Use(middleware.RecoveryMiddleware(conf.Logger, true))
 	// 2. Metrics (Prometheus)
-	ginEngine.Use(middleware.MetricMiddleware())
+	ginEngine.Use(middleware.MetricMiddleware(skipPaths...))
 	// 3. Access Logger
 	if conf.EnableLogger {
 		ginEngine.Use(middleware.LoggerMiddleware(conf.Logger))

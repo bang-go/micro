@@ -17,6 +17,9 @@ type Server interface {
 
 type ServerConfig struct {
 	Addr string
+	// ObservabilitySkipPaths 跳过可观测性记录（Metrics & Trace）的路径列表
+	// 默认为 /healthz, /metrics。用户配置将与默认值合并。
+	ObservabilitySkipPaths []string
 }
 
 type serverEntity struct {
@@ -50,12 +53,18 @@ func (s *serverEntity) Start(handler func(Connect)) error {
 		w.Write([]byte("OK"))
 	})
 
+	// Prepare Skip Paths (Default + User Config)
+	skipPaths := []string{"/healthz", "/metrics"}
+	skipPaths = append(skipPaths, s.config.ObservabilitySkipPaths...)
+
 	s.server = &http.Server{
 		Addr: s.config.Addr,
 		Handler: otelhttp.NewHandler(mux, "wsx",
 			otelhttp.WithFilter(func(r *http.Request) bool {
-				if r.URL.Path == "/healthz" || r.URL.Path == "/metrics" {
-					return false
+				for _, p := range skipPaths {
+					if r.URL.Path == p {
+						return false
+					}
 				}
 				return true
 			}),
@@ -108,7 +117,22 @@ func (s *serverEntity) Handler(handler func(Connect)) http.HandlerFunc {
 
 		// 2. Post-Handshake / OnConnect Hook
 		// Useful for binding UserID to connection immediately after upgrade
-		c := NewConnect(conn, s.options.connectOpts...)
+
+		// Check Observability Skip
+		skipObservability := false
+		for _, p := range s.config.ObservabilitySkipPaths {
+			if r.URL.Path == p {
+				skipObservability = true
+				break
+			}
+		}
+
+		connOpts := s.options.connectOpts
+		if skipObservability {
+			connOpts = append(connOpts, WithSkipObservability(true))
+		}
+
+		c := NewConnect(conn, connOpts...)
 
 		if s.options.onConnect != nil {
 			// Allow OnConnect to return error to close connection?

@@ -45,8 +45,26 @@ func init() {
 }
 
 // MetricMiddleware returns a gin.HandlerFunc (middleware) that records metrics
-func MetricMiddleware() gin.HandlerFunc {
+// skipPaths: paths to ignore
+func MetricMiddleware(skipPaths ...string) gin.HandlerFunc {
+	// Create a map for faster lookup
+	skipMap := make(map[string]struct{}, len(skipPaths))
+	for _, p := range skipPaths {
+		skipMap[p] = struct{}{}
+	}
+
 	return func(c *gin.Context) {
+		// Check if path should be skipped
+		if _, ok := skipMap[c.FullPath()]; ok {
+			c.Next()
+			return
+		}
+		// Also check RequestURI for exact matches like /healthz if FullPath is not set or different
+		if _, ok := skipMap[c.Request.URL.Path]; ok {
+			c.Next()
+			return
+		}
+
 		start := time.Now()
 		method := c.Request.Method
 		path := c.FullPath()

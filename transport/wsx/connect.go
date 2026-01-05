@@ -64,6 +64,8 @@ type connectEntity struct {
 
 	closed chan struct{}
 	once   sync.Once
+
+	skipObservability bool
 }
 
 func NewConnect(conn *websocket.Conn, opts ...opt.Option[connectOptions]) Connect {
@@ -86,10 +88,13 @@ func NewConnect(conn *websocket.Conn, opts ...opt.Option[connectOptions]) Connec
 		sendChan:          make(chan message, options.sendBufferSize),
 		closed:            make(chan struct{}),
 		meta:              make(map[string]interface{}),
+		skipObservability: options.skipObservability,
 	}
 
 	// Metrics: Increment active connections
-	connActive.Inc()
+	if !c.skipObservability {
+		connActive.Inc()
+	}
 
 	// Start write loop
 	go c.writeLoop()
@@ -103,7 +108,9 @@ func (c *connectEntity) writeLoop() {
 
 	defer func() {
 		// Metrics: Decrement active connections
-		connActive.Dec()
+		if !c.skipObservability {
+			connActive.Dec()
+		}
 	}()
 
 	for {
@@ -118,11 +125,15 @@ func (c *connectEntity) writeLoop() {
 			cancel()
 			if err != nil {
 				// Log? Close?
-				msgSent.WithLabelValues("error").Inc()
+				if !c.skipObservability {
+					msgSent.WithLabelValues("error").Inc()
+				}
 				c.Close()
 				return
 			}
-			msgSent.WithLabelValues("success").Inc()
+			if !c.skipObservability {
+				msgSent.WithLabelValues("success").Inc()
+			}
 
 		case <-ticker.C:
 			// Send Ping
@@ -162,7 +173,9 @@ func (c *connectEntity) send(ctx context.Context, msg message) error {
 	case c.sendChan <- msg:
 		return nil
 	case <-ctx.Done():
-		msgSent.WithLabelValues("dropped").Inc()
+		if !c.skipObservability {
+			msgSent.WithLabelValues("dropped").Inc()
+		}
 		return ctx.Err()
 	}
 }
@@ -181,7 +194,9 @@ func (c *connectEntity) ReadMessage(ctx context.Context) (websocket.MessageType,
 	if err != nil {
 		return 0, nil, err
 	}
-	msgReceived.Inc()
+	if !c.skipObservability {
+		msgReceived.Inc()
+	}
 	return mt, data, nil
 }
 

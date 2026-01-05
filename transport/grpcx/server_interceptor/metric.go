@@ -42,8 +42,17 @@ func init() {
 	prometheus.MustRegister(ServerInFlight)
 }
 
-func UnaryServerMetricInterceptor() grpc.UnaryServerInterceptor {
+func UnaryServerMetricInterceptor(skipMethods ...string) grpc.UnaryServerInterceptor {
+	skipMap := make(map[string]struct{}, len(skipMethods))
+	for _, m := range skipMethods {
+		skipMap[m] = struct{}{}
+	}
+
 	return func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
+		if _, ok := skipMap[info.FullMethod]; ok {
+			return handler(ctx, req)
+		}
+
 		start := time.Now()
 		ServerInFlight.WithLabelValues(info.FullMethod).Inc()
 		defer ServerInFlight.WithLabelValues(info.FullMethod).Dec()
@@ -59,8 +68,17 @@ func UnaryServerMetricInterceptor() grpc.UnaryServerInterceptor {
 	}
 }
 
-func StreamServerMetricInterceptor() grpc.StreamServerInterceptor {
+func StreamServerMetricInterceptor(skipMethods ...string) grpc.StreamServerInterceptor {
+	skipMap := make(map[string]struct{}, len(skipMethods))
+	for _, m := range skipMethods {
+		skipMap[m] = struct{}{}
+	}
+
 	return func(srv interface{}, stream grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+		if _, ok := skipMap[info.FullMethod]; ok {
+			return handler(srv, stream)
+		}
+
 		start := time.Now()
 		ServerInFlight.WithLabelValues(info.FullMethod).Inc()
 		defer ServerInFlight.WithLabelValues(info.FullMethod).Dec()
