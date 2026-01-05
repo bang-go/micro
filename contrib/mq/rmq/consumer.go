@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
+	"strings"
 	"time"
 
 	rmqClient "github.com/apache/rocketmq-clients/golang/v5"
@@ -148,7 +150,16 @@ func (c *consumerEntity) Start() error {
 	select {
 	case err := <-done:
 		if err == nil && c.EnableLogger {
-			c.Logger.Info(context.Background(), "rmq_consumer_started", "group", c.Group, "topic", c.Topic)
+			topic := c.Topic
+			if topic == "" && len(c.SubscriptionExpressions) > 0 {
+				topics := make([]string, 0, len(c.SubscriptionExpressions))
+				for t := range c.SubscriptionExpressions {
+					topics = append(topics, t)
+				}
+				sort.Strings(topics)
+				topic = strings.Join(topics, ",")
+			}
+			c.Logger.Info(context.Background(), "rmq_consumer_started", "group", c.Group, "topic", topic)
 		}
 		return err
 	case <-time.After(timeout):
