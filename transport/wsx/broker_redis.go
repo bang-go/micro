@@ -47,6 +47,11 @@ func (b *RedisBroker) Subscribe(ctx context.Context, channel string, handler fun
 
 	// Start a goroutine to listen
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				// Log panic?
+			}
+		}()
 		ch := b.pubsub.Channel()
 		for msg := range ch {
 			if msg.Channel == channel {

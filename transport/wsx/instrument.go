@@ -29,6 +29,26 @@ var (
 		Name: "ws_hub_broadcast_total",
 		Help: "Total number of broadcast events processed by hub",
 	})
+
+	// Hub kick events
+	hubKick = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "ws_hub_kick_total",
+		Help: "Total number of kick events processed by hub",
+	})
+
+	// Hub room operations
+	// Label: op = "join" | "leave" | "broadcast"
+	hubRoomOps = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "ws_hub_room_ops_total",
+		Help: "Total number of room operations",
+	}, []string{"op"})
+
+	// Limit exceeded events
+	// Label: type = "max_rooms"
+	limitExceeded = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "ws_limit_exceeded_total",
+		Help: "Total number of limit exceeded events",
+	}, []string{"type"})
 )
 
 func init() {
@@ -39,4 +59,7 @@ func init() {
 	prometheus.MustRegister(msgReceived)
 	prometheus.MustRegister(msgSent)
 	prometheus.MustRegister(hubBroadcast)
+	prometheus.MustRegister(hubKick)
+	prometheus.MustRegister(hubRoomOps)
+	prometheus.MustRegister(limitExceeded)
 }

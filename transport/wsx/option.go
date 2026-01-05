@@ -59,6 +59,7 @@ type serverOptions struct {
 	onConnect   func(c Connect, r *http.Request) error
 	path        string
 	connectOpts []opt.Option[connectOptions]
+	hub         Hub
 }
 
 func WithServerReadBufferSize(size int) opt.Option[serverOptions] {
@@ -100,6 +101,12 @@ func WithServerPath(path string) opt.Option[serverOptions] {
 func WithServerConnectOption(opts ...opt.Option[connectOptions]) opt.Option[serverOptions] {
 	return opt.OptionFunc[serverOptions](func(o *serverOptions) {
 		o.connectOpts = append(o.connectOpts, opts...)
+	})
+}
+
+func WithServerHub(h Hub) opt.Option[serverOptions] {
+	return opt.OptionFunc[serverOptions](func(o *serverOptions) {
+		o.hub = h
 	})
 }
 

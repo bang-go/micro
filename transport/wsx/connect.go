@@ -46,6 +46,12 @@ type Connect interface {
 	Get(key string) (value interface{}, exists bool)
 	// Set stores a value in metadata
 	Set(key string, value interface{})
+
+	// Rooms returns the list of rooms this connection has joined
+	Rooms() []string
+	// Internal methods for room management
+	addRoom(room string)
+	removeRoom(room string)
 }
 
 type connectEntity struct {
@@ -53,6 +59,7 @@ type connectEntity struct {
 
 	id     string
 	meta   map[string]interface{}
+	rooms  map[string]struct{}
 	metaMu sync.RWMutex
 
 	heartbeatInterval time.Duration
@@ -71,7 +78,7 @@ type connectEntity struct {
 func NewConnect(conn *websocket.Conn, opts ...opt.Option[connectOptions]) Connect {
 	options := &connectOptions{
 		heartbeatInterval: 30 * time.Second,
-		readTimeout:       60 * time.Second,
+		readTimeout:       0, // Default to 0 (no timeout) to avoid killing idle connections with active heartbeats
 		writeTimeout:      10 * time.Second,
 	}
 	opt.Each(options, opts...)
@@ -88,6 +95,7 @@ func NewConnect(conn *websocket.Conn, opts ...opt.Option[connectOptions]) Connec
 		sendChan:          make(chan message, options.sendBufferSize),
 		closed:            make(chan struct{}),
 		meta:              make(map[string]interface{}),
+		rooms:             make(map[string]struct{}),
 		skipObservability: options.skipObservability,
 	}
 
@@ -103,6 +111,15 @@ func NewConnect(conn *websocket.Conn, opts ...opt.Option[connectOptions]) Connec
 }
 
 func (c *connectEntity) writeLoop() {
+	// Panic Recovery
+	defer func() {
+		if r := recover(); r != nil {
+			// Log panic?
+			// For now just close connection
+			c.Close()
+		}
+	}()
+
 	ticker := time.NewTicker(c.heartbeatInterval)
 	defer ticker.Stop()
 
@@ -236,4 +253,26 @@ func (c *connectEntity) Set(key string, value interface{}) {
 	c.metaMu.Lock()
 	defer c.metaMu.Unlock()
 	c.meta[key] = value
+}
+
+func (c *connectEntity) Rooms() []string {
+	c.metaMu.RLock()
+	defer c.metaMu.RUnlock()
+	rooms := make([]string, 0, len(c.rooms))
+	for r := range c.rooms {
+		rooms = append(rooms, r)
+	}
+	return rooms
+}
+
+func (c *connectEntity) addRoom(room string) {
+	c.metaMu.Lock()
+	defer c.metaMu.Unlock()
+	c.rooms[room] = struct{}{}
+}
+
+func (c *connectEntity) removeRoom(room string) {
+	c.metaMu.Lock()
+	defer c.metaMu.Unlock()
+	delete(c.rooms, room)
 }

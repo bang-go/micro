@@ -74,6 +74,9 @@ func (s *serverEntity) Start(handler func(Connect)) error {
 }
 
 func (s *serverEntity) Shutdown(ctx context.Context) error {
+	if s.options.hub != nil {
+		s.options.hub.Close()
+	}
 	if s.server != nil {
 		return s.server.Shutdown(ctx)
 	}
@@ -143,6 +146,9 @@ func (s *serverEntity) Handler(handler func(Connect)) http.HandlerFunc {
 				return
 			}
 		}
+
+		// Ensure connection is closed when handler returns or panics
+		defer c.Close()
 
 		handler(c)
 	}
