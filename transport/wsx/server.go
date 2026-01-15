@@ -4,19 +4,22 @@ import (
 	"context"
 	"net/http"
 
+	"github.com/bang-go/micro/telemetry/logger"
 	"github.com/bang-go/opt"
 	"github.com/coder/websocket"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
 type Server interface {
-	Start(func(Connect)) error
+	Start(context.Context, func(Connect)) error
 	Shutdown(context.Context) error
 	Handler(func(Connect)) http.HandlerFunc
 }
 
 type ServerConfig struct {
-	Addr string
+	Addr         string
+	Logger       *logger.Logger
+	EnableLogger bool
 	// ObservabilitySkipPaths 跳过可观测性记录（Metrics & Trace）的路径列表
 	// 默认为 /healthz, /metrics。用户配置将与默认值合并。
 	ObservabilitySkipPaths []string
@@ -29,6 +32,13 @@ type serverEntity struct {
 }
 
 func NewServer(conf *ServerConfig, opts ...opt.Option[serverOptions]) Server {
+	if conf == nil {
+		conf = &ServerConfig{}
+	}
+	if conf.Logger == nil {
+		conf.Logger = logger.New(logger.WithLevel("info"))
+	}
+
 	options := &serverOptions{
 		// Coder websocket defaults are usually good (no buffer size config needed typically)
 		path:        "/ws",
@@ -43,7 +53,7 @@ func NewServer(conf *ServerConfig, opts ...opt.Option[serverOptions]) Server {
 	return s
 }
 
-func (s *serverEntity) Start(handler func(Connect)) error {
+func (s *serverEntity) Start(ctx context.Context, handler func(Connect)) error {
 	mux := http.NewServeMux()
 	// WebSocket Route
 	mux.HandleFunc(s.options.path, s.Handler(handler))
@@ -70,6 +80,7 @@ func (s *serverEntity) Start(handler func(Connect)) error {
 			}),
 		),
 	}
+	s.info(ctx, "ws server starting", "addr", s.config.Addr)
 	return s.server.ListenAndServe()
 }
 
@@ -78,13 +89,30 @@ func (s *serverEntity) Shutdown(ctx context.Context) error {
 		s.options.hub.Close()
 	}
 	if s.server != nil {
+		s.info(ctx, "ws server shutting down")
 		return s.server.Shutdown(ctx)
 	}
 	return nil
 }
 
+func (s *serverEntity) info(ctx context.Context, msg string, args ...any) {
+	if s.config.EnableLogger {
+		s.config.Logger.Info(ctx, msg, args...)
+	}
+}
+
 func (s *serverEntity) Handler(handler func(Connect)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// 0. Recovery
+		defer func() {
+			if err := recover(); err != nil {
+				s.config.Logger.Error(r.Context(), "[ws_panic_recovery]",
+					"error", err,
+					"path", r.URL.Path,
+				)
+			}
+		}()
+
 		// 1. Auth Hook
 		if s.options.beforeUpgrade != nil {
 			if err := s.options.beforeUpgrade(r); err != nil {
@@ -117,6 +145,12 @@ func (s *serverEntity) Handler(handler func(Connect)) http.HandlerFunc {
 			// Usually yes.
 			return
 		}
+
+		s.info(r.Context(), "ws_access_log",
+			"method", r.Method,
+			"path", r.URL.Path,
+			"ip", r.RemoteAddr,
+		)
 
 		// 2. Post-Handshake / OnConnect Hook
 		// Useful for binding UserID to connection immediately after upgrade

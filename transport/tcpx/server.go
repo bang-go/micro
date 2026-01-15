@@ -63,7 +63,7 @@ func (f HandlerFunc) Handle(ctx context.Context, conn Connect) error {
 type Interceptor func(next Handler) Handler
 
 type Server interface {
-	Start(Handler) error
+	Start(context.Context, Handler) error
 	Shutdown(context.Context) error
 	Use(interceptors ...Interceptor)
 }
@@ -110,7 +110,7 @@ func (s *serverEntity) Use(interceptors ...Interceptor) {
 	s.interceptors = append(s.interceptors, interceptors...)
 }
 
-func (s *serverEntity) Start(handler Handler) (err error) {
+func (s *serverEntity) Start(ctx context.Context, handler Handler) (err error) {
 	s.mu.Lock()
 	if s.isRunning {
 		s.mu.Unlock()
@@ -150,6 +150,8 @@ func (s *serverEntity) Start(handler Handler) (err error) {
 		s.isRunning = false
 		s.mu.Unlock()
 	}()
+
+	s.info(ctx, "tcp server starting", "addr", s.config.Addr)
 
 	// Chain interceptors
 	finalHandler := handler
@@ -208,6 +210,13 @@ func (s *serverEntity) Start(handler Handler) (err error) {
 }
 
 func (s *serverEntity) handleConn(conn net.Conn, handler Handler, tracer trace.Tracer) {
+	// Panic recovery for each connection handler
+	defer func() {
+		if err := recover(); err != nil {
+			s.config.Logger.Error(context.Background(), "[tcpx_panic_recovery]", "error", err)
+		}
+	}()
+
 	// Metrics
 	ServerConnections.WithLabelValues(s.config.Addr).Inc()
 	defer ServerConnections.WithLabelValues(s.config.Addr).Dec()
@@ -244,12 +253,10 @@ func (s *serverEntity) handleConn(conn net.Conn, handler Handler, tracer trace.T
 	err := handler.Handle(ctx, wrappedConn)
 	duration := time.Since(start)
 
-	if s.config.EnableLogger {
-		if err != nil {
-			s.config.Logger.Error(ctx, "tcpx_conn_error", "remote", conn.RemoteAddr().String(), "error", err, "cost", duration.Seconds())
-		} else {
-			s.config.Logger.Info(ctx, "tcpx_conn_end", "remote", conn.RemoteAddr().String(), "cost", duration.Seconds())
-		}
+	if err != nil {
+		s.config.Logger.Error(ctx, "tcpx_conn_error", "remote", conn.RemoteAddr().String(), "error", err, "cost", duration.Seconds())
+	} else {
+		s.info(ctx, "tcpx_conn_end", "remote", conn.RemoteAddr().String(), "cost", duration.Seconds())
 	}
 }
 
@@ -261,6 +268,9 @@ func (s *serverEntity) Shutdown(ctx context.Context) error {
 	}
 	s.isRunning = false
 	close(s.stopCh)
+
+	s.info(ctx, "tcp server shutting down")
+
 	// Close listener to unblock Accept
 	if s.listen != nil {
 		s.listen.Close()
@@ -281,5 +291,11 @@ func (s *serverEntity) Shutdown(ctx context.Context) error {
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
+	}
+}
+
+func (s *serverEntity) info(ctx context.Context, msg string, args ...any) {
+	if s.config.EnableLogger {
+		s.config.Logger.Info(ctx, msg, args...)
 	}
 }

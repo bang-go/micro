@@ -1,6 +1,7 @@
 package gormx
 
 import (
+	"context"
 	"errors"
 	"time"
 
@@ -122,6 +123,16 @@ type plugin struct {
 	dbName       string
 }
 
+func (p *plugin) info(ctx context.Context, msg string, args ...any) {
+	if p.enableLogger {
+		p.logger.Info(ctx, msg, args...)
+	}
+}
+
+func (p *plugin) error(ctx context.Context, msg string, args ...any) {
+	p.logger.Error(ctx, msg, args...)
+}
+
 func (p *plugin) Name() string {
 	return "micro_gorm_plugin"
 }
@@ -217,30 +228,28 @@ func (p *plugin) after(operation string) func(*gorm.DB) {
 		DBRequestsTotal.WithLabelValues(p.dbName, operation, status, table).Inc()
 
 		// Logging
-		if p.enableLogger {
-			sql := db.Dialector.Explain(db.Statement.SQL.String(), db.Statement.Vars...)
+		sql := db.Dialector.Explain(db.Statement.SQL.String(), db.Statement.Vars...)
 
-			if status == "error" {
-				p.logger.Error(db.Statement.Context, "db_query_failed",
-					"db", p.dbName,
-					"operation", operation,
-					"table", table,
-					"sql", sql,
-					"rows", db.RowsAffected,
-					"error", db.Error,
-					"cost", duration,
-				)
-			} else {
-				p.logger.Info(db.Statement.Context, "db_access_log",
-					"db", p.dbName,
-					"operation", operation,
-					"table", table,
-					"sql", sql,
-					"rows", db.RowsAffected,
-					"status", status,
-					"cost", duration,
-				)
-			}
+		if status == "error" {
+			p.error(db.Statement.Context, "db_query_failed",
+				"db", p.dbName,
+				"operation", operation,
+				"table", table,
+				"sql", sql,
+				"rows", db.RowsAffected,
+				"error", db.Error,
+				"cost", duration,
+			)
+		} else {
+			p.info(db.Statement.Context, "db_access_log",
+				"db", p.dbName,
+				"operation", operation,
+				"table", table,
+				"sql", sql,
+				"rows", db.RowsAffected,
+				"status", status,
+				"cost", duration,
+			)
 		}
 	}
 }

@@ -107,6 +107,16 @@ type hook struct {
 	enableLogger bool
 }
 
+func (h *hook) info(ctx context.Context, msg string, args ...any) {
+	if h.enableLogger {
+		h.logger.Info(ctx, msg, args...)
+	}
+}
+
+func (h *hook) error(ctx context.Context, msg string, args ...any) {
+	h.logger.Error(ctx, msg, args...)
+}
+
 func (h *hook) DialHook(next redis.DialHook) redis.DialHook {
 	return func(ctx context.Context, network, addr string) (net.Conn, error) {
 		return next(ctx, network, addr)
@@ -129,26 +139,21 @@ func (h *hook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
 		RedisRequestsTotal.WithLabelValues(h.addr, cmd.Name(), status).Inc()
 
 		// Logging
-		if h.enableLogger {
-			if err != nil && !errors.Is(err, redis.Nil) {
-				h.logger.Error(ctx, "redis_command_failed",
-					"addr", h.addr,
-					"command", cmd.Name(),
-					"args", cmd.Args(),
-					"error", err,
-					"cost", duration,
-				)
-			} else {
-				// Access log for Redis might be too verbose, usually we only log errors or slow queries
-				// But to match other components, we provide it.
-				// In production, users might toggle EnableLogger to false if QPS is high.
-				h.logger.Info(ctx, "redis_access_log",
-					"addr", h.addr,
-					"command", cmd.Name(),
-					"status", status,
-					"cost", duration,
-				)
-			}
+		if err != nil && !errors.Is(err, redis.Nil) {
+			h.error(ctx, "redis_command_failed",
+				"addr", h.addr,
+				"command", cmd.Name(),
+				"args", cmd.Args(),
+				"error", err,
+				"cost", duration,
+			)
+		} else {
+			h.info(ctx, "redis_access_log",
+				"addr", h.addr,
+				"command", cmd.Name(),
+				"status", status,
+				"cost", duration,
+			)
 		}
 
 		return err
@@ -171,22 +176,20 @@ func (h *hook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.Process
 		RedisRequestsTotal.WithLabelValues(h.addr, "pipeline", status).Inc()
 
 		// Logging
-		if h.enableLogger {
-			if err != nil && !errors.Is(err, redis.Nil) {
-				h.logger.Error(ctx, "redis_pipeline_failed",
-					"addr", h.addr,
-					"count", len(cmds),
-					"error", err,
-					"cost", duration,
-				)
-			} else {
-				h.logger.Info(ctx, "redis_pipeline_access_log",
-					"addr", h.addr,
-					"count", len(cmds),
-					"status", status,
-					"cost", duration,
-				)
-			}
+		if err != nil && !errors.Is(err, redis.Nil) {
+			h.error(ctx, "redis_pipeline_failed",
+				"addr", h.addr,
+				"count", len(cmds),
+				"error", err,
+				"cost", duration,
+			)
+		} else {
+			h.info(ctx, "redis_pipeline_access_log",
+				"addr", h.addr,
+				"count", len(cmds),
+				"status", status,
+				"cost", duration,
+			)
 		}
 
 		return err

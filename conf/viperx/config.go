@@ -10,10 +10,11 @@ import (
 )
 
 type Config struct {
-	Name  string // e.g. "application"
-	Type  string // e.g. "yaml"
-	Path  string // e.g. "./config" or "/etc/myapp/"
-	Watch bool   // Enable hot reload
+	Name     string // e.g. "application"
+	Type     string // e.g. "yaml"
+	Path     string // e.g. "./config" or "/etc/myapp/"
+	Watch    bool   // Enable hot reload
+	OnChange func(fsnotify.Event)
 }
 
 func New(conf *Config) (*viper.Viper, error) {
@@ -63,8 +64,9 @@ func New(conf *Config) (*viper.Viper, error) {
 
 	if conf.Watch {
 		v.OnConfigChange(func(e fsnotify.Event) {
-			// Config file changed
-			// You can add a callback here if needed
+			if conf.OnChange != nil {
+				conf.OnChange(e)
+			}
 		})
 		v.WatchConfig()
 	}

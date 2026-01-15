@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/bang-go/micro/telemetry/logger"
-	server_interceptor "github.com/bang-go/micro/transport/grpcx/server_interceptor"
+	serverinterceptor "github.com/bang-go/micro/transport/grpcx/server_interceptor"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/health"
@@ -21,9 +21,9 @@ type Server interface {
 	AddServerOptions(serverOption ...grpc.ServerOption)
 	AddUnaryInterceptor(interceptor ...grpc.UnaryServerInterceptor)
 	AddStreamInterceptor(interceptor ...grpc.StreamServerInterceptor)
-	Start(ServerRegisterFunc) error
+	Start(context.Context, ServerRegisterFunc) error
 	Engine() *grpc.Server
-	Shutdown() error
+	Shutdown(context.Context) error
 }
 
 type ServerEntity struct {
@@ -63,28 +63,28 @@ func NewServer(conf *ServerConfig) Server {
 	// Default Interceptors for Enterprise Production
 	unaryInterceptors := []grpc.UnaryServerInterceptor{
 		// 1. Recovery
-		server_interceptor.UnaryServerRecoveryInterceptor(func(ctx context.Context, p any) {
+		serverinterceptor.UnaryServerRecoveryInterceptor(func(ctx context.Context, p any) {
 			conf.Logger.Error(ctx, "[Recovery from panic]", "error", p, "stack", string(debug.Stack()))
 		}),
 		// 2. Metrics
-		server_interceptor.UnaryServerMetricInterceptor(skipMethods...),
+		serverinterceptor.UnaryServerMetricInterceptor(skipMethods...),
 	}
 	// 3. Access Logger
 	if conf.EnableLogger {
-		unaryInterceptors = append(unaryInterceptors, server_interceptor.UnaryServerLoggerInterceptor(conf.Logger))
+		unaryInterceptors = append(unaryInterceptors, serverinterceptor.UnaryServerLoggerInterceptor(conf.Logger, skipMethods...))
 	}
 
 	streamInterceptors := []grpc.StreamServerInterceptor{
 		// 1. Recovery
-		server_interceptor.StreamServerRecoveryInterceptor(func(ctx context.Context, p any) {
+		serverinterceptor.StreamServerRecoveryInterceptor(func(ctx context.Context, p any) {
 			conf.Logger.Error(ctx, "[Recovery from panic]", "error", p, "stack", string(debug.Stack()))
 		}),
 		// 2. Metrics
-		server_interceptor.StreamServerMetricInterceptor(skipMethods...),
+		serverinterceptor.StreamServerMetricInterceptor(skipMethods...),
 	}
 	// 3. Access Logger
 	if conf.EnableLogger {
-		streamInterceptors = append(streamInterceptors, server_interceptor.StreamServerLoggerInterceptor(conf.Logger))
+		streamInterceptors = append(streamInterceptors, serverinterceptor.StreamServerLoggerInterceptor(conf.Logger, skipMethods...))
 	}
 
 	return &ServerEntity{
@@ -96,16 +96,16 @@ func NewServer(conf *ServerConfig) Server {
 }
 
 var defaultServerKeepaliveEnforcementPolicy = keepalive.EnforcementPolicy{
-	MinTime:             10 * time.Second, // If a client pings more than once every 5 seconds, terminate the connection
-	PermitWithoutStream: true,             // Allow pings even when there are no active streams
+	MinTime:             10 * time.Second,
+	PermitWithoutStream: true,
 }
 
 var defaultServerKeepaliveParams = keepalive.ServerParameters{
-	MaxConnectionIdle:     infinity,         // If a client is idle for 15 seconds, send a GOAWAY
-	MaxConnectionAge:      infinity,         // If any connection is alive for more than 30 seconds, send a GOAWAY
-	MaxConnectionAgeGrace: 30 * time.Second, // Allow 530seconds for pending RPCs to complete before forcibly closing connections
-	Time:                  10 * time.Second, // Ping the client if it is idle for 5 seconds to ensure the connection is still active
-	Timeout:               2 * time.Second,  // Wait 1 second for the ping ack before assuming the connection is dead
+	MaxConnectionIdle:     infinity,
+	MaxConnectionAge:      infinity,
+	MaxConnectionAgeGrace: 30 * time.Second,
+	Time:                  10 * time.Second,
+	Timeout:               2 * time.Second,
 }
 
 func (s *ServerEntity) AddServerOptions(serverOption ...grpc.ServerOption) {
@@ -120,12 +120,17 @@ func (s *ServerEntity) AddStreamInterceptor(interceptor ...grpc.StreamServerInte
 	s.streamInterceptors = append(s.streamInterceptors, interceptor...)
 }
 
-func (s *ServerEntity) Start(register ServerRegisterFunc) (err error) {
+func (s *ServerEntity) Start(ctx context.Context, register ServerRegisterFunc) (err error) {
 	lis, err := net.Listen("tcp", s.Addr)
 	if err != nil {
 		return fmt.Errorf("grpcx: failed to listen: %w", err)
 	}
-	baseOptions := []grpc.ServerOption{grpc.KeepaliveEnforcementPolicy(defaultServerKeepaliveEnforcementPolicy), grpc.KeepaliveParams(defaultServerKeepaliveParams)}
+
+	baseOptions := []grpc.ServerOption{
+		grpc.KeepaliveEnforcementPolicy(defaultServerKeepaliveEnforcementPolicy),
+		grpc.KeepaliveParams(defaultServerKeepaliveParams),
+	}
+
 	if s.Trace {
 		// Prepare Skip Methods (Default + User Config)
 		skipMethods := []string{"/grpc.health.v1.Health/Check", "/grpc.health.v1.Health/Watch"}
@@ -145,7 +150,10 @@ func (s *ServerEntity) Start(register ServerRegisterFunc) (err error) {
 	}
 
 	s.serverOptions = append(baseOptions, s.serverOptions...)
-	options := append(s.serverOptions, grpc.ChainUnaryInterceptor(s.unaryInterceptors...), grpc.ChainStreamInterceptor(s.streamInterceptors...))
+	options := append(s.serverOptions,
+		grpc.ChainUnaryInterceptor(s.unaryInterceptors...),
+		grpc.ChainStreamInterceptor(s.streamInterceptors...),
+	)
 	s.grpcServer = grpc.NewServer(options...)
 
 	// Health Check
@@ -155,7 +163,8 @@ func (s *ServerEntity) Start(register ServerRegisterFunc) (err error) {
 
 	register(s.grpcServer)
 
-	//注册优雅退出 future
+	s.info(ctx, "grpc server starting", "addr", s.Addr)
+
 	err = s.grpcServer.Serve(lis)
 	return
 }
@@ -164,13 +173,20 @@ func (s *ServerEntity) Engine() *grpc.Server {
 	return s.grpcServer
 }
 
-func (s *ServerEntity) Shutdown() error {
+func (s *ServerEntity) Shutdown(ctx context.Context) error {
 	if s.healthServer != nil {
 		s.healthServer.SetServingStatus("", grpc_health_v1.HealthCheckResponse_NOT_SERVING)
 	}
 	if s.grpcServer != nil {
+		s.info(ctx, "grpc server shutting down")
 		s.grpcServer.GracefulStop()
 		s.grpcServer = nil
 	}
 	return nil
+}
+
+func (s *ServerEntity) info(ctx context.Context, msg string, args ...any) {
+	if s.EnableLogger {
+		s.Logger.Info(ctx, msg, args...)
+	}
 }

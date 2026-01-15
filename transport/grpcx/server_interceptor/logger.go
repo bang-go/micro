@@ -10,8 +10,18 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-func UnaryServerLoggerInterceptor(l *logger.Logger) grpc.UnaryServerInterceptor {
+func UnaryServerLoggerInterceptor(l *logger.Logger, skipMethods ...string) grpc.UnaryServerInterceptor {
+	skip := make(map[string]struct{})
+	for _, m := range skipMethods {
+		skip[m] = struct{}{}
+	}
+
 	return func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
+		// Skip logging for specified methods
+		if _, ok := skip[info.FullMethod]; ok {
+			return handler(ctx, req)
+		}
+
 		start := time.Now()
 		resp, err := handler(ctx, req)
 		duration := time.Since(start)
@@ -33,8 +43,18 @@ func UnaryServerLoggerInterceptor(l *logger.Logger) grpc.UnaryServerInterceptor 
 	}
 }
 
-func StreamServerLoggerInterceptor(l *logger.Logger) grpc.StreamServerInterceptor {
+func StreamServerLoggerInterceptor(l *logger.Logger, skipMethods ...string) grpc.StreamServerInterceptor {
+	skip := make(map[string]struct{})
+	for _, m := range skipMethods {
+		skip[m] = struct{}{}
+	}
+
 	return func(srv interface{}, stream grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+		// Skip logging for specified methods
+		if _, ok := skip[info.FullMethod]; ok {
+			return handler(srv, stream)
+		}
+
 		start := time.Now()
 		err := handler(srv, stream)
 		duration := time.Since(start)

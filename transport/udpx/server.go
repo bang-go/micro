@@ -54,7 +54,7 @@ func (f HandlerFunc) Handle(ctx context.Context, packet []byte, addr net.Addr, c
 type Interceptor func(next Handler) Handler
 
 type Server interface {
-	Start(Handler) error
+	Start(context.Context, Handler) error
 	Shutdown(context.Context) error
 	Use(interceptors ...Interceptor)
 }
@@ -105,7 +105,7 @@ func (s *serverEntity) Use(interceptors ...Interceptor) {
 	s.interceptors = append(s.interceptors, interceptors...)
 }
 
-func (s *serverEntity) Start(handler Handler) (err error) {
+func (s *serverEntity) Start(ctx context.Context, handler Handler) (err error) {
 	s.mu.Lock()
 	if s.isRunning {
 		s.mu.Unlock()
@@ -155,6 +155,8 @@ func (s *serverEntity) Start(handler Handler) (err error) {
 		s.isRunning = false
 		s.mu.Unlock()
 	}()
+
+	s.info(ctx, "udp server starting", "addr", s.config.Addr)
 
 	// Chain interceptors
 	finalHandler := handler
@@ -218,6 +220,13 @@ type packetData struct {
 }
 
 func (s *serverEntity) handlePacket(p packetData, handler Handler, tracer trace.Tracer) {
+	// Panic recovery for each packet handler
+	defer func() {
+		if err := recover(); err != nil {
+			s.config.Logger.Error(context.Background(), "[udpx_panic_recovery]", "error", err)
+		}
+	}()
+
 	// Metrics
 	ServerPacketsReceived.WithLabelValues(s.config.Addr).Inc()
 
@@ -239,11 +248,11 @@ func (s *serverEntity) handlePacket(p packetData, handler Handler, tracer trace.
 	err := handler.Handle(ctx, p.data, p.addr, s.conn)
 	duration := time.Since(start)
 
-	if s.config.EnableLogger {
-		if err != nil {
-			s.config.Logger.Error(ctx, "udpx_handle_error", "remote", p.addr.String(), "error", err, "cost", duration.Seconds())
-		} else {
-			// Debug level for UDP access logs usually, as volume is high
+	if err != nil {
+		s.config.Logger.Error(ctx, "udpx_handle_error", "remote", p.addr.String(), "error", err, "cost", duration.Seconds())
+	} else {
+		// Debug level for UDP access logs usually, as volume is high
+		if s.config.EnableLogger {
 			s.config.Logger.Debug(ctx, "udpx_handle_success", "remote", p.addr.String(), "cost", duration.Seconds())
 		}
 	}
@@ -257,6 +266,9 @@ func (s *serverEntity) Shutdown(ctx context.Context) error {
 	}
 	s.isRunning = false
 	close(s.stopCh)
+
+	s.info(ctx, "udp server shutting down")
+
 	if s.conn != nil {
 		s.conn.Close()
 	}
@@ -287,5 +299,11 @@ func (s *serverEntity) Shutdown(ctx context.Context) error {
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
+	}
+}
+
+func (s *serverEntity) info(ctx context.Context, msg string, args ...any) {
+	if s.config.EnableLogger {
+		s.config.Logger.Info(ctx, msg, args...)
 	}
 }

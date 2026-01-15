@@ -8,10 +8,22 @@ import (
 )
 
 // LoggerMiddleware returns a gin.HandlerFunc (middleware) that logs requests using micro/logger
-func LoggerMiddleware(log *logger.Logger) gin.HandlerFunc {
+func LoggerMiddleware(log *logger.Logger, skipPaths ...string) gin.HandlerFunc {
+	skip := make(map[string]struct{})
+	for _, path := range skipPaths {
+		skip[path] = struct{}{}
+	}
+
 	return func(c *gin.Context) {
 		start := time.Now()
 		path := c.Request.URL.Path
+
+		// Skip logging for specified paths
+		if _, ok := skip[path]; ok {
+			c.Next()
+			return
+		}
+
 		query := c.Request.URL.RawQuery
 
 		c.Next()

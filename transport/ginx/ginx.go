@@ -13,12 +13,12 @@ import (
 )
 
 type Server interface {
-	Start() error
+	Start(context.Context) error
 	Use(...gin.HandlerFunc)
 	Engine() *http.Server
 	GinEngine() *gin.Engine
 	Group(relativePath string, handlers ...gin.HandlerFunc) *gin.RouterGroup
-	Shutdown() error
+	Shutdown(context.Context) error
 }
 
 type ServerConfig struct {
@@ -101,7 +101,7 @@ func New(conf *ServerConfig) Server {
 	ginEngine.Use(middleware.MetricMiddleware(skipPaths...))
 	// 3. Access Logger
 	if conf.EnableLogger {
-		ginEngine.Use(middleware.LoggerMiddleware(conf.Logger))
+		ginEngine.Use(middleware.LoggerMiddleware(conf.Logger, skipPaths...))
 	}
 
 	// Default Health Check Route
@@ -127,7 +127,8 @@ func (s *ServerEntity) Use(middlewares ...gin.HandlerFunc) {
 	s.ginEngine.Use(middlewares...)
 }
 
-func (s *ServerEntity) Start() (err error) {
+func (s *ServerEntity) Start(ctx context.Context) (err error) {
+
 	s.httpServer = &http.Server{
 		Addr:    s.Addr,
 		Handler: s.ginEngine,
@@ -136,7 +137,11 @@ func (s *ServerEntity) Start() (err error) {
 		WriteTimeout: s.WriteTimeout,
 		IdleTimeout:  s.IdleTimeout,
 	}
+
+	s.info(ctx, "http server starting", "addr", s.Addr)
+
 	err = s.httpServer.ListenAndServe()
+
 	return
 }
 
@@ -144,11 +149,18 @@ func (s *ServerEntity) Group(relativePath string, handlers ...gin.HandlerFunc) *
 	return s.ginEngine.Group(relativePath, handlers...)
 }
 
-func (s *ServerEntity) Shutdown() error {
+func (s *ServerEntity) Shutdown(ctx context.Context) error {
 	if s.httpServer == nil {
 		return nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
+	s.info(ctx, "http server shutting down")
 	return s.httpServer.Shutdown(ctx)
+
+}
+
+func (s *ServerEntity) info(ctx context.Context, msg string, args ...any) {
+	if s.EnableLogger {
+		s.Logger.Info(ctx, msg, args...)
+	}
+
 }
