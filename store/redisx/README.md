@@ -17,19 +17,17 @@
 import "github.com/bang-go/micro/store/redisx"
 
 func main() {
-    client, err := redisx.New(&redisx.Config{
-        Addr:         "localhost:6379",
-        Password:     "123456",
-        DB:           0,
-        Trace:        true, // 开启追踪
-        EnableMetric: true, // 开启监控
+    client := redisx.New(&redisx.Config{
+        Addr:            "localhost:6379",
+        Password:        "123456",
+        DB:              0,
+        Trace:           true, // 开启追踪
+        EnableLogger:    true, // 开启日志
+        DisableIdentity: true, // 禁用客户端标识（针对不支持 CLIENT SETINFO 的低版本 Redis）
     })
-    if err != nil {
-        panic(err)
-    }
 
     // 使用标准 go-redis API
-    err = client.Set(ctx, "key", "value", 0).Err()
+    err := client.Set(ctx, "key", "value", 0).Err()
     val, err := client.Get(ctx, "key").Result()
 }
 ```
@@ -38,15 +36,19 @@ func main() {
 
 ```go
 type Config struct {
-    Addr         string
-    Username     string
-    Password     string
-    DB           int
-    MaxRetries   int
-    MinIdleConns int
-    PoolSize     int
-    
-    Trace        bool // OpenTelemetry Tracing
-    EnableMetric bool // Prometheus Metrics
+	Addr         string
+	Password     string
+	DB           int
+	PoolSize     int
+	MinIdleConns int
+	DialTimeout  time.Duration
+	ReadTimeout  time.Duration
+	WriteTimeout time.Duration
+	Protocol     int
+	DisableIdentity bool
+
+	Trace        bool
+	Logger       *logger.Logger
+	EnableLogger bool
 }
 ```

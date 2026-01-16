@@ -37,19 +37,19 @@ func init() {
 }
 
 type Config struct {
-	Addr         string
-	Password     string
-	DB           int
-	PoolSize     int
-	MinIdleConns int
-	DialTimeout  time.Duration
-	ReadTimeout  time.Duration
-	WriteTimeout time.Duration
-	Protocol     int
-
-	Trace        bool
-	Logger       *logger.Logger
-	EnableLogger bool
+	Addr            string
+	Password        string
+	DB              int
+	PoolSize        int
+	MinIdleConns    int
+	DialTimeout     time.Duration
+	ReadTimeout     time.Duration
+	WriteTimeout    time.Duration
+	Protocol        int
+	DisableIdentity bool
+	Trace           bool
+	Logger          *logger.Logger
+	EnableLogger    bool
 }
 
 func New(conf *Config) *redis.Client {
@@ -61,15 +61,16 @@ func New(conf *Config) *redis.Client {
 	}
 
 	opt := &redis.Options{
-		Addr:         conf.Addr,
-		Password:     conf.Password,
-		DB:           conf.DB,
-		PoolSize:     conf.PoolSize,
-		MinIdleConns: conf.MinIdleConns,
-		DialTimeout:  conf.DialTimeout,
-		ReadTimeout:  conf.ReadTimeout,
-		WriteTimeout: conf.WriteTimeout,
-		Protocol:     conf.Protocol,
+		Addr:            conf.Addr,
+		Password:        conf.Password,
+		DB:              conf.DB,
+		PoolSize:        conf.PoolSize,
+		MinIdleConns:    conf.MinIdleConns,
+		DialTimeout:     conf.DialTimeout,
+		ReadTimeout:     conf.ReadTimeout,
+		WriteTimeout:    conf.WriteTimeout,
+		Protocol:        conf.Protocol,
+		DisableIdentity: conf.DisableIdentity,
 	}
 
 	// Default timeouts if not set
