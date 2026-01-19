@@ -2,6 +2,7 @@ package wsx
 
 import (
 	"context"
+	"math/rand"
 	"sync"
 	"time"
 
@@ -12,18 +13,18 @@ import (
 type Client interface {
 	Connect(context.Context) error
 	Close()
-	OnConnect(func(Connect))
-	OnMessage(func(websocket.MessageType, []byte))
-	OnClose(func(error))
+	OnConnect(func(context.Context, Connect))
+	OnMessage(func(context.Context, websocket.MessageType, []byte))
+	OnClose(func(context.Context, error))
 }
 
 type clientEntity struct {
 	addr    string
 	options *clientOptions
 
-	onConnect func(Connect)
-	onMessage func(websocket.MessageType, []byte)
-	onClose   func(error)
+	onConnect func(context.Context, Connect)
+	onMessage func(context.Context, websocket.MessageType, []byte)
+	onClose   func(context.Context, error)
 
 	conn   Connect
 	closed chan struct{}
@@ -85,16 +86,25 @@ func (c *clientEntity) loop(ctx context.Context) {
 		if err != nil {
 			if firstTry {
 				c.firstConnect <- err
-				return // Stop if first try fails (user expects error)
+				return
 			}
 
-			c.handleError(err)
+			c.handleError(ctx, err)
 			reconnectAttempts++
 			if c.options.maxReconnectAttempts >= 0 && reconnectAttempts > c.options.maxReconnectAttempts {
 				return
 			}
-			time.Sleep(c.options.reconnectInterval)
-			continue
+
+			// Exponential backoff with jitter
+			delay := c.calculateBackoff(reconnectAttempts)
+			select {
+			case <-time.After(delay):
+				continue
+			case <-ctx.Done():
+				return
+			case <-c.closed:
+				return
+			}
 		}
 
 		if firstTry {
@@ -102,7 +112,7 @@ func (c *clientEntity) loop(ctx context.Context) {
 			c.firstConnect <- nil
 		}
 
-		// Reset attempts
+		// Reset attempts on successful connection
 		reconnectAttempts = 0
 
 		// Wrap connection
@@ -112,31 +122,49 @@ func (c *clientEntity) loop(ctx context.Context) {
 		c.mu.Unlock()
 
 		if c.onConnect != nil {
-			c.onConnect(wsConn)
+			c.onConnect(ctx, wsConn)
 		}
 
 		// Block reading
 		for {
-			// Use context for read?
-			// We should probably allow the loop context to cancel reading.
 			mt, msg, err := wsConn.ReadMessage(ctx)
 			if err != nil {
-				c.handleError(err)
+				c.handleError(ctx, err)
 				wsConn.Close()
 				break
 			}
 			if c.onMessage != nil {
-				c.onMessage(mt, msg)
+				c.onMessage(ctx, mt, msg)
 			}
 		}
 
-		time.Sleep(c.options.reconnectInterval)
+		// If connection drops, wait before next attempt
+		delay := c.calculateBackoff(0) // use base interval
+		time.Sleep(delay)
 	}
 }
 
-func (c *clientEntity) handleError(err error) {
+func (c *clientEntity) calculateBackoff(attempt int) time.Duration {
+	if attempt == 0 {
+		return c.options.reconnectInterval
+	}
+
+	// Exponential backoff: base * 2^attempt
+	backoff := float64(c.options.reconnectInterval) * float64(int(1)<<uint(attempt))
+
+	// Max backoff: 30s
+	if backoff > float64(30*time.Second) {
+		backoff = float64(30 * time.Second)
+	}
+
+	// Add jitter: ±20%
+	jitter := (rand.Float64()*0.4 - 0.2) * backoff
+	return time.Duration(backoff + jitter)
+}
+
+func (c *clientEntity) handleError(ctx context.Context, err error) {
 	if c.onClose != nil {
-		c.onClose(err)
+		c.onClose(ctx, err)
 	} else {
 		// Log error if needed
 		// fmt.Printf("wsx client error: %v\n", err)
@@ -152,14 +180,14 @@ func (c *clientEntity) Close() {
 	}
 }
 
-func (c *clientEntity) OnConnect(f func(Connect)) {
+func (c *clientEntity) OnConnect(f func(context.Context, Connect)) {
 	c.onConnect = f
 }
 
-func (c *clientEntity) OnMessage(f func(websocket.MessageType, []byte)) {
+func (c *clientEntity) OnMessage(f func(context.Context, websocket.MessageType, []byte)) {
 	c.onMessage = f
 }
 
-func (c *clientEntity) OnClose(f func(error)) {
+func (c *clientEntity) OnClose(f func(context.Context, error)) {
 	c.onClose = f
 }

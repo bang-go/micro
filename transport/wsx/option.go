@@ -1,6 +1,7 @@
 package wsx
 
 import (
+	"context"
 	"net/http"
 	"time"
 
@@ -56,7 +57,7 @@ type serverOptions struct {
 	// beforeUpgrade 允许在升级前进行鉴权。如果返回 error，升级将被拒绝。
 	beforeUpgrade func(r *http.Request) error
 	// onConnect 允许在连接建立后立即执行逻辑（如绑定 UserID）。如果返回 error，连接将关闭。
-	onConnect   func(c Connect, r *http.Request) error
+	onConnect   func(ctx context.Context, c Connect, r *http.Request) error
 	path        string
 	connectOpts []opt.Option[connectOptions]
 	hub         Hub
@@ -86,7 +87,7 @@ func WithServerBeforeUpgrade(f func(r *http.Request) error) opt.Option[serverOpt
 	})
 }
 
-func WithServerOnConnect(f func(c Connect, r *http.Request) error) opt.Option[serverOptions] {
+func WithServerOnConnect(f func(ctx context.Context, c Connect, r *http.Request) error) opt.Option[serverOptions] {
 	return opt.OptionFunc[serverOptions](func(o *serverOptions) {
 		o.onConnect = f
 	})

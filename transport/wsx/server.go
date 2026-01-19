@@ -11,9 +11,9 @@ import (
 )
 
 type Server interface {
-	Start(context.Context, func(Connect)) error
+	Start(context.Context, func(context.Context, Connect)) error
 	Shutdown(context.Context) error
-	Handler(func(Connect)) http.HandlerFunc
+	Handler(func(context.Context, Connect)) http.HandlerFunc
 }
 
 type ServerConfig struct {
@@ -53,7 +53,7 @@ func NewServer(conf *ServerConfig, opts ...opt.Option[serverOptions]) Server {
 	return s
 }
 
-func (s *serverEntity) Start(ctx context.Context, handler func(Connect)) error {
+func (s *serverEntity) Start(ctx context.Context, handler func(context.Context, Connect)) error {
 	mux := http.NewServeMux()
 	// WebSocket Route
 	mux.HandleFunc(s.options.path, s.Handler(handler))
@@ -101,7 +101,7 @@ func (s *serverEntity) info(ctx context.Context, msg string, args ...any) {
 	}
 }
 
-func (s *serverEntity) Handler(handler func(Connect)) http.HandlerFunc {
+func (s *serverEntity) Handler(handler func(context.Context, Connect)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// 0. Recovery
 		defer func() {
@@ -171,11 +171,17 @@ func (s *serverEntity) Handler(handler func(Connect)) http.HandlerFunc {
 
 		c := NewConnect(conn, connOpts...)
 
+		// 3. Register to Hub if present
+		if s.options.hub != nil {
+			s.options.hub.Register(c)
+			defer s.options.hub.Unregister(c)
+		}
+
 		if s.options.onConnect != nil {
 			// Allow OnConnect to return error to close connection?
 			// Or just set ID.
 			// Let's pass Connect to it.
-			if err := s.options.onConnect(c, r); err != nil {
+			if err := s.options.onConnect(r.Context(), c, r); err != nil {
 				c.Close()
 				return
 			}
@@ -184,6 +190,6 @@ func (s *serverEntity) Handler(handler func(Connect)) http.HandlerFunc {
 		// Ensure connection is closed when handler returns or panics
 		defer c.Close()
 
-		handler(c)
+		handler(r.Context(), c)
 	}
 }

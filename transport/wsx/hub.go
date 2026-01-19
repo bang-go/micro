@@ -19,25 +19,28 @@ type Hub interface {
 	Unregister(Connect)
 
 	// Broadcast 广播消息给所有连接 (分布式)
-	Broadcast(msg []byte)
+	Broadcast(ctx context.Context, msg []byte)
 
 	// SendTo 向特定 UserID 的连接发送消息 (分布式)
-	SendTo(userID string, msg []byte)
+	SendTo(ctx context.Context, userID string, msg []byte)
 
 	// Kick 强制断开特定 UserID 的所有连接 (分布式)
-	Kick(userID string)
+	Kick(ctx context.Context, userID string)
 
 	// Join 将特定 UserID 加入房间 (分布式 - 实际上是本地操作，但需要通过 Redis 协调或业务层调用)
-	// 这里的 Join 是指将 UserID 的当前和未来连接关联到 room。
-	// 但通常 WebSocket 的 Room 是临时的，绑定在 Connection 上。
-	// 考虑到 userIndex，我们可以让 Join 作用于 userID 当前的所有连接。
-	Join(userID string, room string)
+	Join(ctx context.Context, userID string, room string)
 
 	// Leave 将特定 UserID 移出房间
-	Leave(userID string, room string)
+	Leave(ctx context.Context, userID string, room string)
 
 	// BroadcastToRoom 向特定房间广播消息 (分布式)
-	BroadcastToRoom(room string, msg []byte)
+	BroadcastToRoom(ctx context.Context, room string, msg []byte)
+
+	// BroadcastJSON 广播 JSON 消息 (分布式)
+	BroadcastJSON(ctx context.Context, v interface{}) error
+
+	// SendJSONTo 向特定用户发送 JSON 消息 (分布式)
+	SendJSONTo(ctx context.Context, userID string, v interface{}) error
 
 	// Count 返回当前在线连接数 (本地)
 	Count() int64
@@ -48,10 +51,11 @@ type Hub interface {
 
 // Internal Protocol for Redis PubSub
 type hubMessage struct {
-	Type        string            `json:"type"`             // "broadcast", "unicast", "kick", "room_cast"
-	Target      string            `json:"target,omitempty"` // UserID for unicast/kick, RoomID for room_cast
+	Type        string            `json:"type"`             // "broadcast", "unicast", "kick", "room_cast", "room_join", "room_leave"
+	Target      string            `json:"target,omitempty"` // UserID for unicast/kick, RoomID for room_cast/join/leave
 	Payload     []byte            `json:"payload,omitempty"`
 	TraceHeader map[string]string `json:"trace_header,omitempty"` // Trace propagation
+	UserID      string            `json:"user_id,omitempty"`      // For room_join/room_leave
 }
 
 type hubEntity struct {
@@ -159,7 +163,7 @@ func (h *hubEntity) Unregister(c Connect) {
 	}
 }
 
-func (h *hubEntity) Kick(userID string) {
+func (h *hubEntity) Kick(ctx context.Context, userID string) {
 	hubKick.Inc()
 
 	// Wrap in protocol
@@ -167,116 +171,74 @@ func (h *hubEntity) Kick(userID string) {
 		Type:   "kick",
 		Target: userID,
 	}
-	h.injectTrace(&hm)
+	h.injectTrace(ctx, &hm)
 
 	data, _ := json.Marshal(hm)
 
 	if h.broker != nil {
-		_ = h.broker.Publish(context.Background(), h.channel, data)
+		_ = h.broker.Publish(ctx, h.channel, data)
 		return
 	}
 
 	// Local fallback
-	h.kickLocal(context.Background(), userID)
+	h.kickLocal(ctx, userID)
 }
 
-func (h *hubEntity) Join(userID string, room string) {
-	// Join is local operation but we need to ensure all connections of this user join the room.
-	// Since userIndex is local, we only operate locally.
-	// Wait, if Join is called on Pod A, but user is on Pod B?
-	// Redis PubSub doesn't support "Join Room" command usually unless we broadcast "Join" instruction.
-	// But usually Join is initiated by the user connection (e.g. HTTP request to Pod A where user is connected).
-	// IF the user is connected to Pod B, and Pod A receives "Join", we have a problem.
-	// However, typically "Join" happens on the node where the connection exists.
-	// So we assume Join is local.
-	h.mu.Lock()
-	defer h.mu.Unlock()
+func (h *hubEntity) Join(ctx context.Context, userID string, room string) {
+	hm := hubMessage{
+		Type:   "room_join",
+		Target: room,
+		UserID: userID,
+	}
+	h.injectTrace(ctx, &hm)
+	data, _ := json.Marshal(hm)
 
-	conns := h.userIndex[userID]
-	if len(conns) == 0 {
+	if h.broker != nil {
+		_ = h.broker.Publish(ctx, h.channel, data)
 		return
 	}
 
-	// Check limit for each connection
-	// If one user has multiple devices, we check limit for each device independently.
-	// But Join adds all devices to the room.
-	// We need to iterate and check limit.
-	for c := range conns {
-		currentRooms := c.Rooms()
-		// Check if already in room
-		inRoom := false
-		for _, r := range currentRooms {
-			if r == room {
-				inRoom = true
-				break
-			}
-		}
-		if inRoom {
-			continue
-		}
-
-		if len(currentRooms) >= h.maxRoomsPerConnect {
-			limitExceeded.WithLabelValues("max_rooms").Inc()
-			continue // Skip this connection, or error?
-			// Since Join is "best effort" for all devices, skipping full devices is reasonable.
-		}
-
-		if h.rooms[room] == nil {
-			h.rooms[room] = make(map[Connect]struct{})
-		}
-		h.rooms[room][c] = struct{}{}
-		c.addRoom(room)
-		hubRoomOps.WithLabelValues("join").Inc()
-	}
+	h.joinLocal(ctx, userID, room)
 }
 
-func (h *hubEntity) Leave(userID string, room string) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
+func (h *hubEntity) Leave(ctx context.Context, userID string, room string) {
+	hm := hubMessage{
+		Type:   "room_leave",
+		Target: room,
+		UserID: userID,
+	}
+	h.injectTrace(ctx, &hm)
+	data, _ := json.Marshal(hm)
 
-	conns := h.userIndex[userID]
-	if len(conns) == 0 {
+	if h.broker != nil {
+		_ = h.broker.Publish(ctx, h.channel, data)
 		return
 	}
 
-	if h.rooms[room] == nil {
-		return
-	}
-
-	for c := range conns {
-		if _, ok := h.rooms[room][c]; ok {
-			delete(h.rooms[room], c)
-			c.removeRoom(room)
-			hubRoomOps.WithLabelValues("leave").Inc()
-		}
-	}
-
-	if len(h.rooms[room]) == 0 {
-		delete(h.rooms, room)
-	}
+	h.leaveLocal(ctx, userID, room)
 }
 
-func (h *hubEntity) BroadcastToRoom(room string, msg []byte) {
+func (h *hubEntity) BroadcastToRoom(ctx context.Context, room string, msg []byte) {
 	// Wrap in protocol
 	hm := hubMessage{
 		Type:    "room_cast",
 		Target:  room,
 		Payload: msg,
 	}
-	h.injectTrace(&hm)
+	h.injectTrace(ctx, &hm)
 
 	data, _ := json.Marshal(hm)
 
 	if h.broker != nil {
-		_ = h.broker.Publish(context.Background(), h.channel, data)
+		_ = h.broker.Publish(ctx, h.channel, data)
 		return
 	}
 
 	// Local fallback
-	h.broadcastToRoomLocal(context.Background(), room, msg)
+	h.broadcastToRoomLocal(ctx, room, msg)
 }
 
-func (h *hubEntity) Broadcast(msg []byte) {
+func (h *hubEntity) Broadcast(ctx context.Context, msg []byte) {
 	hubBroadcast.Inc()
 
 	// Wrap in protocol
@@ -284,37 +246,55 @@ func (h *hubEntity) Broadcast(msg []byte) {
 		Type:    "broadcast",
 		Payload: msg,
 	}
-	h.injectTrace(&hm)
+	h.injectTrace(ctx, &hm)
 
 	data, _ := json.Marshal(hm)
 
 	if h.broker != nil {
-		_ = h.broker.Publish(context.Background(), h.channel, data)
+		_ = h.broker.Publish(ctx, h.channel, data)
 		return
 	}
 
 	// Local fallback
-	h.broadcastLocal(context.Background(), msg)
+	h.broadcastLocal(ctx, msg)
 }
 
-func (h *hubEntity) SendTo(userID string, msg []byte) {
+func (h *hubEntity) SendTo(ctx context.Context, userID string, msg []byte) {
 	// Wrap in protocol
 	hm := hubMessage{
 		Type:    "unicast",
 		Target:  userID,
 		Payload: msg,
 	}
-	h.injectTrace(&hm)
+	h.injectTrace(ctx, &hm)
 
 	data, _ := json.Marshal(hm)
 
 	if h.broker != nil {
-		_ = h.broker.Publish(context.Background(), h.channel, data)
+		_ = h.broker.Publish(ctx, h.channel, data)
 		return
 	}
 
 	// Local fallback
-	h.sendToLocal(context.Background(), userID, msg)
+	h.sendToLocal(ctx, userID, msg)
+}
+
+func (h *hubEntity) BroadcastJSON(ctx context.Context, v interface{}) error {
+	data, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	h.Broadcast(ctx, data)
+	return nil
+}
+
+func (h *hubEntity) SendJSONTo(ctx context.Context, userID string, v interface{}) error {
+	data, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	h.SendTo(ctx, userID, data)
+	return nil
 }
 
 func (h *hubEntity) handleBrokerMessage(data []byte) {
@@ -325,10 +305,6 @@ func (h *hubEntity) handleBrokerMessage(data []byte) {
 
 	// Extract Trace
 	ctx := h.extractTrace(&hm)
-	// Currently we don't pass ctx to local methods (broadcastLocal etc take context.Background with timeout)
-	// But we can use it for logging or creating a child span here if we want to trace the processing latency.
-	// For now, let's at least keep the context available if we expand local methods to accept it.
-	_ = ctx
 
 	switch hm.Type {
 	case "broadcast":
@@ -339,16 +315,22 @@ func (h *hubEntity) handleBrokerMessage(data []byte) {
 		h.kickLocal(ctx, hm.Target)
 	case "room_cast":
 		h.broadcastToRoomLocal(ctx, hm.Target, hm.Payload)
+	case "room_join":
+		h.joinLocal(ctx, hm.UserID, hm.Target)
+	case "room_leave":
+		h.leaveLocal(ctx, hm.UserID, hm.Target)
 	}
 }
 
 // injectTrace adds current span context to hubMessage
-func (h *hubEntity) injectTrace(hm *hubMessage) {
-	// For now we use background context as Hub interface doesn't support context yet.
-	// But if we had one, we would inject it here.
-	// We can use otel.GetTextMapPropagator().Inject(ctx, propagation.MapCarrier(hm.TraceHeader))
-	// Since we don't have ctx, we skip injection for now or inject empty.
-	// To fully support trace, we need to change Hub interface to accept Context.
+func (h *hubEntity) injectTrace(ctx context.Context, hm *hubMessage) {
+	if ctx == nil {
+		return
+	}
+	if hm.TraceHeader == nil {
+		hm.TraceHeader = make(map[string]string)
+	}
+	otel.GetTextMapPropagator().Inject(ctx, propagation.MapCarrier(hm.TraceHeader))
 }
 
 // extractTrace gets context from hubMessage
@@ -411,12 +393,105 @@ func (h *hubEntity) broadcastToRoomLocal(ctx context.Context, room string, msg [
 	h.batchSend(ctx, conns, msg)
 }
 
-func (h *hubEntity) batchSend(ctx context.Context, conns []Connect, msg []byte) {
-	for _, c := range conns {
-		sendCtx, cancel := context.WithTimeout(ctx, 5*time.Millisecond)
-		_ = c.SendBinary(sendCtx, msg)
-		cancel()
+func (h *hubEntity) joinLocal(ctx context.Context, userID string, room string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	conns := h.userIndex[userID]
+	if len(conns) == 0 {
+		return
 	}
+
+	for c := range conns {
+		currentRooms := c.Rooms()
+		inRoom := false
+		for _, r := range currentRooms {
+			if r == room {
+				inRoom = true
+				break
+			}
+		}
+		if inRoom {
+			continue
+		}
+
+		if len(currentRooms) >= h.maxRoomsPerConnect {
+			limitExceeded.WithLabelValues("max_rooms").Inc()
+			continue
+		}
+
+		if h.rooms[room] == nil {
+			h.rooms[room] = make(map[Connect]struct{})
+		}
+		h.rooms[room][c] = struct{}{}
+		c.addRoom(room)
+		hubRoomOps.WithLabelValues("join").Inc()
+	}
+}
+
+func (h *hubEntity) leaveLocal(ctx context.Context, userID string, room string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	conns := h.userIndex[userID]
+	if len(conns) == 0 {
+		return
+	}
+
+	if h.rooms[room] == nil {
+		return
+	}
+
+	for c := range conns {
+		if _, ok := h.rooms[room][c]; ok {
+			delete(h.rooms[room], c)
+			c.removeRoom(room)
+			hubRoomOps.WithLabelValues("leave").Inc()
+		}
+	}
+
+	if len(h.rooms[room]) == 0 {
+		delete(h.rooms, room)
+	}
+}
+
+func (h *hubEntity) batchSend(ctx context.Context, conns []Connect, msg []byte) {
+	// For small number of connections, send sequentially to avoid goroutine overhead
+	if len(conns) <= 10 {
+		for _, c := range conns {
+			sendCtx, cancel := context.WithTimeout(ctx, 5*time.Millisecond)
+			_ = c.SendBinary(sendCtx, msg)
+			cancel()
+		}
+		return
+	}
+
+	// For larger numbers, use a bit of concurrency
+	// We use a semaphore-like approach or just simple goroutines if the number isn't extreme.
+	// Considering SendBinary is non-blocking (it just pushes to a channel),
+	// the main bottleneck would be many connections with full channels.
+
+	var wg sync.WaitGroup
+	// Limit concurrency to avoid spawning too many goroutines at once
+	sem := make(chan struct{}, 50)
+
+	for _, c := range conns {
+		wg.Add(1)
+		go func(conn Connect) {
+			defer wg.Done()
+			select {
+			case sem <- struct{}{}:
+				defer func() { <-sem }()
+			case <-ctx.Done():
+				return
+			}
+
+			sendCtx, cancel := context.WithTimeout(ctx, 10*time.Millisecond)
+			_ = conn.SendBinary(sendCtx, msg)
+			cancel()
+		}(c)
+	}
+	wg.Wait()
 }
 
 func (h *hubEntity) Count() int64 {

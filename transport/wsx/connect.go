@@ -120,6 +120,13 @@ func (c *connectEntity) writeLoop() {
 		}
 	}()
 
+	// Create a context that is cancelled when c.closed is closed
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		<-c.closed
+		cancel()
+	}()
+
 	ticker := time.NewTicker(c.heartbeatInterval)
 	defer ticker.Stop()
 
@@ -137,9 +144,9 @@ func (c *connectEntity) writeLoop() {
 
 		case msg := <-c.sendChan:
 			// Write message
-			ctx, cancel := context.WithTimeout(context.Background(), c.writeTimeout)
-			err := c.conn.Write(ctx, msg.typ, msg.data)
-			cancel()
+			wCtx, wCancel := context.WithTimeout(ctx, c.writeTimeout)
+			err := c.conn.Write(wCtx, msg.typ, msg.data)
+			wCancel()
 			if err != nil {
 				// Log? Close?
 				if !c.skipObservability {
@@ -155,9 +162,9 @@ func (c *connectEntity) writeLoop() {
 		case <-ticker.C:
 			// Send Ping
 			if c.heartbeatInterval > 0 {
-				ctx, cancel := context.WithTimeout(context.Background(), c.writeTimeout)
-				err := c.conn.Ping(ctx)
-				cancel()
+				pCtx, pCancel := context.WithTimeout(ctx, c.writeTimeout)
+				err := c.conn.Ping(pCtx)
+				pCancel()
 				if err != nil {
 					c.Close()
 					return
@@ -201,9 +208,18 @@ func (c *connectEntity) ReadMessage(ctx context.Context) (websocket.MessageType,
 	// Read Loop should run in its own goroutine usually if we want full duplex?
 	// But standard usage is user calls ReadMessage in a loop.
 
+	// In coder/websocket, we don't use SetReadDeadline like in gorilla.
+	// Instead, we pass a context with timeout to the Read method.
+
+	timeout := c.readTimeout
+	if timeout <= 0 && c.heartbeatInterval > 0 {
+		// If no explicit read timeout, use 2x heartbeat to detect dead connection
+		timeout = c.heartbeatInterval * 2
+	}
+
 	var cancel context.CancelFunc
-	if c.readTimeout > 0 {
-		ctx, cancel = context.WithTimeout(ctx, c.readTimeout)
+	if timeout > 0 {
+		ctx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
 	}
 

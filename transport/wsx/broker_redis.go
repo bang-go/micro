@@ -3,6 +3,7 @@ package wsx
 import (
 	"context"
 	"sync"
+	"time"
 
 	"github.com/redis/go-redis/v9"
 )
@@ -52,11 +53,26 @@ func (b *RedisBroker) Subscribe(ctx context.Context, channel string, handler fun
 				// Log panic?
 			}
 		}()
-		ch := b.pubsub.Channel()
-		for msg := range ch {
-			if msg.Channel == channel {
-				handler([]byte(msg.Payload))
+
+		for {
+			ch := b.pubsub.Channel()
+			for msg := range ch {
+				if msg.Channel == channel {
+					handler([]byte(msg.Payload))
+				}
 			}
+
+			// If channel is closed, it means pubsub is closed or connection lost.
+			// Check if we should exit (if broker is closed)
+			b.mu.Lock()
+			if b.pubsub == nil {
+				b.mu.Unlock()
+				return
+			}
+			// Otherwise, it might be a connection issue, redis-go might handle reconnect,
+			// but we should ensure we get a new channel if needed.
+			b.mu.Unlock()
+			time.Sleep(time.Second)
 		}
 	}()
 
@@ -72,6 +88,7 @@ func (b *RedisBroker) Close() error {
 	defer b.mu.Unlock()
 	if b.pubsub != nil {
 		_ = b.pubsub.Close()
+		b.pubsub = nil
 	}
 	return b.client.Close()
 }
