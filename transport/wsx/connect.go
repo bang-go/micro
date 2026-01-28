@@ -212,11 +212,6 @@ func (c *connectEntity) ReadMessage(ctx context.Context) (websocket.MessageType,
 	// Instead, we pass a context with timeout to the Read method.
 
 	timeout := c.readTimeout
-	if timeout <= 0 && c.heartbeatInterval > 0 {
-		// If no explicit read timeout, use 2x heartbeat to detect dead connection
-		timeout = c.heartbeatInterval * 2
-	}
-
 	var cancel context.CancelFunc
 	if timeout > 0 {
 		ctx, cancel = context.WithTimeout(ctx, timeout)
