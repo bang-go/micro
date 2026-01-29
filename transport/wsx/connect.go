@@ -9,6 +9,7 @@ import (
 
 	"github.com/bang-go/opt"
 	"github.com/coder/websocket"
+	"github.com/google/uuid"
 )
 
 // Message struct for internal queue
@@ -42,6 +43,12 @@ type Connect interface {
 	// SetID sets the unique identifier
 	SetID(string)
 
+	// RemoteAddr returns the remote network address
+	RemoteAddr() string
+
+	// SessionID returns the unique physical session identifier
+	SessionID() string
+
 	// Get retrieves a value from metadata
 	Get(key string) (value interface{}, exists bool)
 	// Set stores a value in metadata
@@ -57,10 +64,12 @@ type Connect interface {
 type connectEntity struct {
 	conn *websocket.Conn
 
-	id     string
-	meta   map[string]interface{}
-	rooms  map[string]struct{}
-	metaMu sync.RWMutex
+	id         string
+	sessionID  string
+	remoteAddr string
+	meta       map[string]interface{}
+	rooms      map[string]struct{}
+	metaMu     sync.RWMutex
 
 	heartbeatInterval time.Duration
 	readTimeout       time.Duration
@@ -75,7 +84,7 @@ type connectEntity struct {
 	skipObservability bool
 }
 
-func NewConnect(conn *websocket.Conn, opts ...opt.Option[connectOptions]) Connect {
+func NewConnect(conn *websocket.Conn, remoteAddr string, opts ...opt.Option[connectOptions]) Connect {
 	options := &connectOptions{
 		heartbeatInterval: 20 * time.Second,
 		readTimeout:       0, // Default to 0 (no timeout) to avoid killing idle connections with active heartbeats
@@ -89,6 +98,8 @@ func NewConnect(conn *websocket.Conn, opts ...opt.Option[connectOptions]) Connec
 
 	c := &connectEntity{
 		conn:              conn,
+		sessionID:         uuid.NewString(),
+		remoteAddr:        remoteAddr,
 		heartbeatInterval: options.heartbeatInterval,
 		readTimeout:       options.readTimeout,
 		writeTimeout:      options.writeTimeout,
@@ -108,6 +119,14 @@ func NewConnect(conn *websocket.Conn, opts ...opt.Option[connectOptions]) Connec
 	go c.writeLoop()
 
 	return c
+}
+
+func (c *connectEntity) RemoteAddr() string {
+	return c.remoteAddr
+}
+
+func (c *connectEntity) SessionID() string {
+	return c.sessionID
 }
 
 func (c *connectEntity) writeLoop() {

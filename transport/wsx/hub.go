@@ -27,6 +27,9 @@ type Hub interface {
 	// Kick 强制断开特定 UserID 的所有连接 (分布式)
 	Kick(ctx context.Context, userID string)
 
+	// KickWithOrigin 强制断开特定 UserID 的所有连接，但排除指定的 OriginID (分布式)
+	KickWithOrigin(ctx context.Context, userID string, originID string)
+
 	// Join 将特定 UserID 加入房间 (分布式 - 实际上是本地操作，但需要通过 Redis 协调或业务层调用)
 	Join(ctx context.Context, userID string, room string)
 
@@ -56,6 +59,7 @@ type hubMessage struct {
 	Payload     []byte            `json:"payload,omitempty"`
 	TraceHeader map[string]string `json:"trace_header,omitempty"` // Trace propagation
 	UserID      string            `json:"user_id,omitempty"`      // For room_join/room_leave
+	OriginID    string            `json:"origin_id,omitempty"`    // To avoid self-kicking
 }
 
 type hubEntity struct {
@@ -127,6 +131,15 @@ func (h *hubEntity) Register(c Connect) {
 	// Index by UserID if present
 	uid := c.ID()
 	if uid != "" {
+		// 自动踢掉当前节点上该 UID 的旧连接 (单机挤号)
+		if oldConns, ok := h.userIndex[uid]; ok {
+			for oldC := range oldConns {
+				if oldC.SessionID() != c.SessionID() {
+					_ = oldC.Close()
+				}
+			}
+		}
+
 		if h.userIndex[uid] == nil {
 			h.userIndex[uid] = make(map[Connect]struct{})
 		}
@@ -164,12 +177,17 @@ func (h *hubEntity) Unregister(c Connect) {
 }
 
 func (h *hubEntity) Kick(ctx context.Context, userID string) {
+	h.KickWithOrigin(ctx, userID, "")
+}
+
+func (h *hubEntity) KickWithOrigin(ctx context.Context, userID string, originID string) {
 	hubKick.Inc()
 
 	// Wrap in protocol
 	hm := hubMessage{
-		Type:   "kick",
-		Target: userID,
+		Type:     "kick",
+		Target:   userID,
+		OriginID: originID,
 	}
 	h.injectTrace(ctx, &hm)
 
@@ -181,7 +199,7 @@ func (h *hubEntity) Kick(ctx context.Context, userID string) {
 	}
 
 	// Local fallback
-	h.kickLocal(ctx, userID)
+	h.kickLocal(ctx, userID, originID)
 }
 
 func (h *hubEntity) Join(ctx context.Context, userID string, room string) {
@@ -312,7 +330,7 @@ func (h *hubEntity) handleBrokerMessage(data []byte) {
 	case "unicast":
 		h.sendToLocal(ctx, hm.Target, hm.Payload)
 	case "kick":
-		h.kickLocal(ctx, hm.Target)
+		h.kickLocal(ctx, hm.Target, hm.OriginID)
 	case "room_cast":
 		h.broadcastToRoomLocal(ctx, hm.Target, hm.Payload)
 	case "room_join":
@@ -367,12 +385,15 @@ func (h *hubEntity) sendToLocal(ctx context.Context, userID string, msg []byte) 
 	h.batchSend(ctx, conns, msg)
 }
 
-func (h *hubEntity) kickLocal(ctx context.Context, userID string) {
+func (h *hubEntity) kickLocal(ctx context.Context, userID string, originID string) {
 	h.mu.RLock()
 	targetConns := h.userIndex[userID]
 	conns := make([]Connect, 0, len(targetConns))
 	for c := range targetConns {
-		conns = append(conns, c)
+		// 只有当 SessionID 不等于 originID 时才踢掉，防止自杀
+		if originID == "" || c.SessionID() != originID {
+			conns = append(conns, c)
+		}
 	}
 	h.mu.RUnlock()
 

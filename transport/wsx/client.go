@@ -116,7 +116,7 @@ func (c *clientEntity) loop(ctx context.Context) {
 		reconnectAttempts = 0
 
 		// Wrap connection
-		wsConn := NewConnect(conn, c.options.connectOpts...)
+		wsConn := NewConnect(conn, c.addr, c.options.connectOpts...)
 		c.mu.Lock()
 		c.conn = wsConn
 		c.mu.Unlock()

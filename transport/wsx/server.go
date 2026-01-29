@@ -169,7 +169,7 @@ func (s *serverEntity) Handler(handler func(context.Context, Connect)) http.Hand
 			connOpts = append(connOpts, WithSkipObservability(true))
 		}
 
-		c := NewConnect(conn, connOpts...)
+		c := NewConnect(conn, r.RemoteAddr, connOpts...)
 
 		if s.options.onConnect != nil {
 			// Allow OnConnect to return error to close connection?
