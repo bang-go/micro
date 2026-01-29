@@ -24,6 +24,9 @@ type Hub interface {
 	// SendTo 向特定 UserID 的连接发送消息 (分布式)
 	SendTo(ctx context.Context, userID string, msg []byte)
 
+	// SendToWithOrigin 向特定 UserID 的连接发送消息，但排除指定的 OriginID (分布式)
+	SendToWithOrigin(ctx context.Context, userID string, msg []byte, originID string)
+
 	// Kick 强制断开特定 UserID 的所有连接 (分布式)
 	Kick(ctx context.Context, userID string)
 
@@ -44,6 +47,9 @@ type Hub interface {
 
 	// SendJSONTo 向特定用户发送 JSON 消息 (分布式)
 	SendJSONTo(ctx context.Context, userID string, v interface{}) error
+
+	// SendJSONToWithOrigin 向特定用户发送 JSON 消息，但排除指定的 OriginID (分布式)
+	SendJSONToWithOrigin(ctx context.Context, userID string, v interface{}, originID string) error
 
 	// Count 返回当前在线连接数 (本地)
 	Count() int64
@@ -278,11 +284,16 @@ func (h *hubEntity) Broadcast(ctx context.Context, msg []byte) {
 }
 
 func (h *hubEntity) SendTo(ctx context.Context, userID string, msg []byte) {
+	h.SendToWithOrigin(ctx, userID, msg, "")
+}
+
+func (h *hubEntity) SendToWithOrigin(ctx context.Context, userID string, msg []byte, originID string) {
 	// Wrap in protocol
 	hm := hubMessage{
-		Type:    "unicast",
-		Target:  userID,
-		Payload: msg,
+		Type:     "unicast",
+		Target:   userID,
+		Payload:  msg,
+		OriginID: originID,
 	}
 	h.injectTrace(ctx, &hm)
 
@@ -294,7 +305,7 @@ func (h *hubEntity) SendTo(ctx context.Context, userID string, msg []byte) {
 	}
 
 	// Local fallback
-	h.sendToLocal(ctx, userID, msg)
+	h.sendToLocal(ctx, userID, msg, originID)
 }
 
 func (h *hubEntity) BroadcastJSON(ctx context.Context, v interface{}) error {
@@ -307,11 +318,15 @@ func (h *hubEntity) BroadcastJSON(ctx context.Context, v interface{}) error {
 }
 
 func (h *hubEntity) SendJSONTo(ctx context.Context, userID string, v interface{}) error {
+	return h.SendJSONToWithOrigin(ctx, userID, v, "")
+}
+
+func (h *hubEntity) SendJSONToWithOrigin(ctx context.Context, userID string, v interface{}, originID string) error {
 	data, err := json.Marshal(v)
 	if err != nil {
 		return err
 	}
-	h.SendTo(ctx, userID, data)
+	h.SendToWithOrigin(ctx, userID, data, originID)
 	return nil
 }
 
@@ -328,7 +343,7 @@ func (h *hubEntity) handleBrokerMessage(data []byte) {
 	case "broadcast":
 		h.broadcastLocal(ctx, hm.Payload)
 	case "unicast":
-		h.sendToLocal(ctx, hm.Target, hm.Payload)
+		h.sendToLocal(ctx, hm.Target, hm.Payload, hm.OriginID)
 	case "kick":
 		h.kickLocal(ctx, hm.Target, hm.OriginID)
 	case "room_cast":
@@ -372,13 +387,16 @@ func (h *hubEntity) broadcastLocal(ctx context.Context, msg []byte) {
 	h.batchSend(ctx, conns, msg)
 }
 
-func (h *hubEntity) sendToLocal(ctx context.Context, userID string, msg []byte) {
+func (h *hubEntity) sendToLocal(ctx context.Context, userID string, msg []byte, originID string) {
 	h.mu.RLock()
 	// Snapshot connections
 	targetConns := h.userIndex[userID]
 	conns := make([]Connect, 0, len(targetConns))
 	for c := range targetConns {
-		conns = append(conns, c)
+		// 排除发起方 Session
+		if originID == "" || c.SessionID() != originID {
+			conns = append(conns, c)
+		}
 	}
 	h.mu.RUnlock()
 
