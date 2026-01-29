@@ -171,12 +171,6 @@ func (s *serverEntity) Handler(handler func(context.Context, Connect)) http.Hand
 
 		c := NewConnect(conn, connOpts...)
 
-		// 3. Register to Hub if present
-		if s.options.hub != nil {
-			s.options.hub.Register(c)
-			defer s.options.hub.Unregister(c)
-		}
-
 		if s.options.onConnect != nil {
 			// Allow OnConnect to return error to close connection?
 			// Or just set ID.
@@ -185,6 +179,12 @@ func (s *serverEntity) Handler(handler func(context.Context, Connect)) http.Hand
 				c.Close()
 				return
 			}
+		}
+
+		// 3. Register to Hub if present
+		if s.options.hub != nil {
+			s.options.hub.Register(c)
+			defer s.options.hub.Unregister(c)
 		}
 
 		// Ensure connection is closed when handler returns or panics

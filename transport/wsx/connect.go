@@ -77,7 +77,7 @@ type connectEntity struct {
 
 func NewConnect(conn *websocket.Conn, opts ...opt.Option[connectOptions]) Connect {
 	options := &connectOptions{
-		heartbeatInterval: 30 * time.Second,
+		heartbeatInterval: 20 * time.Second,
 		readTimeout:       0, // Default to 0 (no timeout) to avoid killing idle connections with active heartbeats
 		writeTimeout:      10 * time.Second,
 	}
@@ -127,8 +127,13 @@ func (c *connectEntity) writeLoop() {
 		cancel()
 	}()
 
-	ticker := time.NewTicker(c.heartbeatInterval)
-	defer ticker.Stop()
+	var ticker *time.Ticker
+	var tickerC <-chan time.Time
+	if c.heartbeatInterval > 0 {
+		ticker = time.NewTicker(c.heartbeatInterval)
+		defer ticker.Stop()
+		tickerC = ticker.C
+	}
 
 	defer func() {
 		// Metrics: Decrement active connections
@@ -159,16 +164,14 @@ func (c *connectEntity) writeLoop() {
 				msgSent.WithLabelValues("success").Inc()
 			}
 
-		case <-ticker.C:
+		case <-tickerC:
 			// Send Ping
-			if c.heartbeatInterval > 0 {
-				pCtx, pCancel := context.WithTimeout(ctx, c.writeTimeout)
-				err := c.conn.Ping(pCtx)
-				pCancel()
-				if err != nil {
-					c.Close()
-					return
-				}
+			pCtx, pCancel := context.WithTimeout(ctx, c.writeTimeout)
+			err := c.conn.Ping(pCtx)
+			pCancel()
+			if err != nil {
+				c.Close()
+				return
 			}
 		}
 	}
