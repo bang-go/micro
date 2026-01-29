@@ -212,14 +212,8 @@ func (c *connectEntity) ReadMessage(ctx context.Context) (websocket.MessageType,
 	// But standard usage is user calls ReadMessage in a loop.
 
 	// In coder/websocket, we don't use SetReadDeadline like in gorilla.
-	// Instead, we pass a context with timeout to the Read method.
-
-	timeout := c.readTimeout
-	var cancel context.CancelFunc
-	if timeout > 0 {
-		ctx, cancel = context.WithTimeout(ctx, timeout)
-		defer cancel()
-	}
+	// Instead, we pass the original context. The connection will be closed
+	// if the context is cancelled or the Ping loop detects a failure.
 
 	mt, data, err := c.conn.Read(ctx)
 	if err != nil {
