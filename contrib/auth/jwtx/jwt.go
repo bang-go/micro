@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bang-go/util"
 	"github.com/golang-jwt/jwt/v5"
 )
 
@@ -203,22 +204,19 @@ func WithJWTID(id string) IssueOption {
 
 func WithNotBefore(at time.Time) IssueOption {
 	return func(opts *issueOptions) {
-		value := at
-		opts.notBefore = &value
+		opts.notBefore = util.Ptr(at)
 	}
 }
 
 func WithIssuedAt(at time.Time) IssueOption {
 	return func(opts *issueOptions) {
-		value := at
-		opts.issuedAt = &value
+		opts.issuedAt = util.Ptr(at)
 	}
 }
 
 func WithExpiresAt(at time.Time) IssueOption {
 	return func(opts *issueOptions) {
-		value := at
-		opts.expiresAt = &value
+		opts.expiresAt = util.Ptr(at)
 	}
 }
 

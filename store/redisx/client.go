@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/bang-go/micro/telemetry/logger"
+	"github.com/bang-go/util"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/redis/go-redis/extra/redisotel/v9"
 	"github.com/redis/go-redis/v9"
@@ -234,7 +235,7 @@ func prepareConfig(conf *Config) (*Config, *redis.Options, error) {
 			ConnMaxIdleTime:       cloned.ConnMaxIdleTime,
 			ConnMaxLifetime:       cloned.ConnMaxLifetime,
 			TLSConfig:             cloneTLSConfig(cloned.TLSConfig),
-			DisableIdentity:       boolValue(cloned.DisableIdentity, true),
+			DisableIdentity:       util.DerefOr(cloned.DisableIdentity, true),
 			IdentitySuffix:        cloned.IdentitySuffix,
 		}
 	}

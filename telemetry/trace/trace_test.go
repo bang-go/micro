@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bang-go/util"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -23,7 +24,7 @@ func TestPrepareConfig(t *testing.T) {
 		t.Fatalf("default sample rate = %v, want 1", cfg.SampleRate)
 	}
 
-	_, err = prepareConfig(&Config{SampleRate: float64Ptr(2)})
+	_, err = prepareConfig(&Config{SampleRate: util.Ptr(2.0)})
 	if !errors.Is(err, ErrInvalidSampleRate) {
 		t.Fatalf("expected ErrInvalidSampleRate, got %v", err)
 	}

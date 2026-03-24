@@ -60,13 +60,6 @@ func defaultRedisNetwork(addr string) string {
 	return "tcp"
 }
 
-func boolValue(value *bool, defaultValue bool) bool {
-	if value == nil {
-		return defaultValue
-	}
-	return *value
-}
-
 func commandName(cmd redis.Cmder) string {
 	if cmd == nil {
 		return ""

@@ -9,7 +9,7 @@ import (
 	openapi "github.com/alibabacloud-go/darabonba-openapi/v2/models"
 	dysmsapi "github.com/alibabacloud-go/dysmsapi-20170525/v5/client"
 	teaUtil "github.com/alibabacloud-go/tea-utils/v2/service"
-	"github.com/alibabacloud-go/tea/tea"
+	"github.com/bang-go/util"
 )
 
 var (
@@ -171,20 +171,20 @@ func prepareConfig(conf *Config) (*Config, error) {
 
 func buildOpenAPIConfig(conf *Config) *openapi.Config {
 	cfg := &openapi.Config{
-		AccessKeyId:     tea.String(conf.AccessKeyID),
-		AccessKeySecret: tea.String(conf.AccessKeySecret),
+		AccessKeyId:     util.Ptr(conf.AccessKeyID),
+		AccessKeySecret: util.Ptr(conf.AccessKeySecret),
 	}
 	if conf.Endpoint != "" {
-		cfg.Endpoint = tea.String(conf.Endpoint)
+		cfg.Endpoint = util.Ptr(conf.Endpoint)
 	}
 	if conf.RegionID != "" {
-		cfg.RegionId = tea.String(conf.RegionID)
+		cfg.RegionId = util.Ptr(conf.RegionID)
 	}
 	if conf.SecurityToken != "" {
-		cfg.SecurityToken = tea.String(conf.SecurityToken)
+		cfg.SecurityToken = util.Ptr(conf.SecurityToken)
 	}
 	if conf.UserAgent != "" {
-		cfg.UserAgent = tea.String(conf.UserAgent)
+		cfg.UserAgent = util.Ptr(conf.UserAgent)
 	}
 	return cfg
 }
@@ -267,7 +267,7 @@ func prepareQueryRequest(request *QuerySendDetailsRequest) (*QuerySendDetailsReq
 }
 
 func trimStringPointer(value *string) string {
-	return strings.TrimSpace(tea.StringValue(value))
+	return strings.TrimSpace(util.DerefZero(value))
 }
 
 func normalizeStringPointer(value *string) *string {
@@ -275,5 +275,5 @@ func normalizeStringPointer(value *string) *string {
 	if trimmed == "" {
 		return nil
 	}
-	return tea.String(trimmed)
+	return util.Ptr(trimmed)
 }

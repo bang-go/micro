@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bang-go/util"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
@@ -142,11 +143,11 @@ func prepareConfig(conf *Config) (*Config, error) {
 		cloned.Exporter = ExporterStdout
 	}
 	if cloned.SampleRate == nil {
-		cloned.SampleRate = float64Ptr(1)
+		cloned.SampleRate = util.Ptr(1.0)
 	} else if *cloned.SampleRate < 0 || *cloned.SampleRate > 1 {
 		return nil, ErrInvalidSampleRate
 	} else {
-		cloned.SampleRate = float64Ptr(*cloned.SampleRate)
+		cloned.SampleRate = util.ClonePtr(cloned.SampleRate)
 	}
 
 	if cloned.newStdoutExporter == nil {
@@ -347,8 +348,4 @@ func defaultServiceInstanceID() string {
 		return ""
 	}
 	return strings.TrimSpace(hostname)
-}
-
-func float64Ptr(value float64) *float64 {
-	return &value
 }

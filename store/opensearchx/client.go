@@ -11,6 +11,7 @@ import (
 	opensearchutil "github.com/alibabacloud-go/opensearch-util/service"
 	teaUtil "github.com/alibabacloud-go/tea-utils/service"
 	"github.com/alibabacloud-go/tea/tea"
+	"github.com/bang-go/util"
 )
 
 const (
@@ -663,30 +664,30 @@ func (r *teaRequester) Do(ctx context.Context, req requestSpec) (map[string]any,
 	}
 
 	runtime := &teaUtil.RuntimeOptions{
-		ConnectTimeout: tea.Int(int(r.config.ConnectTimeout / time.Millisecond)),
-		ReadTimeout:    tea.Int(int(r.config.ReadTimeout / time.Millisecond)),
-		MaxIdleConns:   tea.Int(r.config.MaxIdleConns),
-		Autoretry:      tea.Bool(false),
-		IgnoreSSL:      tea.Bool(strings.EqualFold(r.config.Protocol, "http")),
+		ConnectTimeout: util.Ptr(int(r.config.ConnectTimeout / time.Millisecond)),
+		ReadTimeout:    util.Ptr(int(r.config.ReadTimeout / time.Millisecond)),
+		MaxIdleConns:   util.Ptr(r.config.MaxIdleConns),
+		Autoretry:      util.Ptr(false),
+		IgnoreSSL:      util.Ptr(strings.EqualFold(r.config.Protocol, "http")),
 	}
 
 	request := tea.NewRequest()
-	request.Protocol = tea.String(strings.ToUpper(r.config.Protocol))
-	request.Method = tea.String(req.Method)
-	request.Pathname = tea.String(req.Path)
+	request.Protocol = util.Ptr(strings.ToUpper(r.config.Protocol))
+	request.Method = util.Ptr(req.Method)
+	request.Pathname = util.Ptr(req.Path)
 	request.Headers = map[string]*string{
-		"user-agent":         teaUtil.GetUserAgent(tea.String(r.config.UserAgent)),
+		"user-agent":         teaUtil.GetUserAgent(util.Ptr(r.config.UserAgent)),
 		"Date":               opensearchutil.GetDate(),
-		"host":               tea.String(r.config.Endpoint),
+		"host":               util.Ptr(r.config.Endpoint),
 		"X-Opensearch-Nonce": teaUtil.GetNonce(),
 	}
 	for key, value := range req.Headers {
 		if value = strings.TrimSpace(value); value != "" {
-			request.Headers[key] = tea.String(value)
+			request.Headers[key] = util.Ptr(value)
 		}
 	}
 	if r.config.SecurityToken != "" {
-		request.Headers["X-Opensearch-Security-Token"] = tea.String(r.config.SecurityToken)
+		request.Headers["X-Opensearch-Security-Token"] = util.Ptr(r.config.SecurityToken)
 	}
 	if len(req.Query) > 0 {
 		query := make(map[string]interface{}, len(req.Query))
@@ -698,17 +699,17 @@ func (r *teaRequester) Do(ctx context.Context, req requestSpec) (map[string]any,
 	if req.Body != nil {
 		body := teaUtil.ToJSONString(req.Body)
 		request.Headers["Content-MD5"] = opensearchutil.GetContentMD5(body)
-		request.Headers["Content-Type"] = tea.String("application/json")
+		request.Headers["Content-Type"] = util.Ptr("application/json")
 		request.Body = tea.ToReader(body)
 	}
 
-	request.Headers["Authorization"] = opensearchutil.GetSignature(request, tea.String(r.config.AccessKeyID), tea.String(r.config.AccessKeySecret))
+	request.Headers["Authorization"] = opensearchutil.GetSignature(request, util.Ptr(r.config.AccessKeyID), util.Ptr(r.config.AccessKeySecret))
 
 	response, err := tea.DoRequest(request, map[string]interface{}{
 		"timeouted":      "retry",
-		"readTimeout":    tea.IntValue(runtime.ReadTimeout),
-		"connectTimeout": tea.IntValue(runtime.ConnectTimeout),
-		"maxIdleConns":   tea.IntValue(runtime.MaxIdleConns),
+		"readTimeout":    util.DerefZero(runtime.ReadTimeout),
+		"connectTimeout": util.DerefZero(runtime.ConnectTimeout),
+		"maxIdleConns":   util.DerefZero(runtime.MaxIdleConns),
 		"retry": map[string]interface{}{
 			"retryable":   false,
 			"maxAttempts": 1,
@@ -717,7 +718,7 @@ func (r *teaRequester) Do(ctx context.Context, req requestSpec) (map[string]any,
 			"policy": "no",
 			"period": 1,
 		},
-		"ignoreSSL": tea.BoolValue(runtime.IgnoreSSL),
+		"ignoreSSL": util.DerefZero(runtime.IgnoreSSL),
 	})
 	if err != nil {
 		return nil, err
@@ -730,16 +731,16 @@ func (r *teaRequester) Do(ctx context.Context, req requestSpec) (map[string]any,
 	if err != nil {
 		return nil, err
 	}
-	if tea.BoolValue(teaUtil.Is4xx(response.StatusCode)) || tea.BoolValue(teaUtil.Is5xx(response.StatusCode)) {
+	if util.DerefZero(teaUtil.Is4xx(response.StatusCode)) || util.DerefZero(teaUtil.Is5xx(response.StatusCode)) {
 		return nil, tea.NewSDKError(map[string]interface{}{
-			"message": tea.StringValue(response.StatusMessage),
-			"data":    tea.StringValue(bodyString),
-			"code":    tea.IntValue(response.StatusCode),
+			"message": util.DerefZero(response.StatusMessage),
+			"data":    util.DerefZero(bodyString),
+			"code":    util.DerefZero(response.StatusCode),
 		})
 	}
 
 	var parsed map[string]any
-	if err := json.Unmarshal([]byte(tea.StringValue(bodyString)), &parsed); err != nil {
+	if err := json.Unmarshal([]byte(util.DerefZero(bodyString)), &parsed); err != nil {
 		return nil, err
 	}
 	return map[string]any{

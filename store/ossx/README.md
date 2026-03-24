@@ -24,8 +24,8 @@ if err != nil {
 }
 
 _, err = client.PutObject(context.Background(), &ossx.PutObjectRequest{
-    Bucket: aliyunoss.Ptr("assets"),
-    Key:    aliyunoss.Ptr("hello.txt"),
+    Bucket: util.Ptr("assets"),
+    Key:    util.Ptr("hello.txt"),
     Body:   strings.NewReader("hello"),
 })
 if err != nil {

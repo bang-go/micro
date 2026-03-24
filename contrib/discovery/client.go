@@ -4,6 +4,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/bang-go/util"
 	"github.com/nacos-group/nacos-sdk-go/v2/clients"
 	"github.com/nacos-group/nacos-sdk-go/v2/clients/naming_client"
 	"github.com/nacos-group/nacos-sdk-go/v2/common/constant"
@@ -58,26 +59,11 @@ func cloneClientConfig(src *constant.ClientConfig) *constant.ClientConfig {
 
 	cloned := *src
 	cloned.Endpoint = strings.TrimSpace(cloned.Endpoint)
-	if src.RamConfig != nil {
-		ramConfig := *src.RamConfig
-		cloned.RamConfig = &ramConfig
-	}
-	if src.KMSv3Config != nil {
-		kmsv3Config := *src.KMSv3Config
-		cloned.KMSv3Config = &kmsv3Config
-	}
-	if src.KMSConfig != nil {
-		kmsConfig := *src.KMSConfig
-		cloned.KMSConfig = &kmsConfig
-	}
-	if src.LogSampling != nil {
-		sampling := *src.LogSampling
-		cloned.LogSampling = &sampling
-	}
-	if src.LogRollingConfig != nil {
-		rolling := *src.LogRollingConfig
-		cloned.LogRollingConfig = &rolling
-	}
+	cloned.RamConfig = util.ClonePtr(src.RamConfig)
+	cloned.KMSv3Config = util.ClonePtr(src.KMSv3Config)
+	cloned.KMSConfig = util.ClonePtr(src.KMSConfig)
+	cloned.LogSampling = util.ClonePtr(src.LogSampling)
+	cloned.LogRollingConfig = util.ClonePtr(src.LogRollingConfig)
 	if src.AppConnLabels != nil {
 		cloned.AppConnLabels = make(map[string]string, len(src.AppConnLabels))
 		for key, value := range src.AppConnLabels {

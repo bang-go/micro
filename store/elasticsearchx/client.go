@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/bang-go/util"
 	"github.com/elastic/go-elasticsearch/v9"
 	"github.com/elastic/go-elasticsearch/v9/typedapi/core/bulk"
 	"github.com/elastic/go-elasticsearch/v9/typedapi/core/delete"
@@ -346,10 +347,10 @@ func appendBulkOperation(req *bulk.Bulk, operation BulkOperation) error {
 			return ErrBulkDocumentRequired
 		}
 		meta := types.IndexOperation{
-			Index_: &indexName,
+			Index_: util.Ptr(indexName),
 		}
 		if id := strings.TrimSpace(operation.ID); id != "" {
-			meta.Id_ = &id
+			meta.Id_ = util.Ptr(id)
 		}
 		if action == "index" {
 			return req.IndexOp(meta, operation.Document)
@@ -368,8 +369,8 @@ func appendBulkOperation(req *bulk.Bulk, operation BulkOperation) error {
 			return fmt.Errorf("elasticsearchx: encode bulk update doc failed: %w", err)
 		}
 		return req.UpdateOp(types.UpdateOperation{
-			Index_: &indexName,
-			Id_:    &id,
+			Index_: util.Ptr(indexName),
+			Id_:    util.Ptr(id),
 		}, nil, &types.UpdateAction{Doc: body})
 	case "delete":
 		id := strings.TrimSpace(operation.ID)
@@ -377,8 +378,8 @@ func appendBulkOperation(req *bulk.Bulk, operation BulkOperation) error {
 			return ErrIDRequired
 		}
 		return req.DeleteOp(types.DeleteOperation{
-			Index_: &indexName,
-			Id_:    &id,
+			Index_: util.Ptr(indexName),
+			Id_:    util.Ptr(id),
 		})
 	default:
 		return fmt.Errorf("elasticsearchx: unsupported bulk action %q", operation.Action)

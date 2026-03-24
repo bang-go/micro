@@ -8,6 +8,7 @@ import (
 
 	aliyunoss "github.com/aliyun/alibabacloud-oss-go-sdk-v2/oss"
 	"github.com/aliyun/alibabacloud-oss-go-sdk-v2/oss/credentials"
+	"github.com/bang-go/util"
 )
 
 var (
@@ -155,8 +156,7 @@ func prepareConfig(conf *Config) (*Config, error) {
 	}
 
 	if cloned.Base != nil {
-		base := cloned.Base.Copy()
-		cloned.Base = &base
+		cloned.Base = util.Ptr(cloned.Base.Copy())
 	}
 
 	sdkConfig := buildSDKConfig(&cloned)

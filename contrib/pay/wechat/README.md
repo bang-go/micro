@@ -25,13 +25,13 @@ if err != nil {
 }
 
 resp, err := client.JsapiPrepay(context.Background(), jsapi.PrepayRequest{
-    Description: core.String("order-1001"),
-    OutTradeNo:  core.String("order-1001"),
+    Description: util.Ptr("order-1001"),
+    OutTradeNo:  util.Ptr("order-1001"),
     Amount: &jsapi.Amount{
         Total: core.Int64(100),
     },
     Payer: &jsapi.Payer{
-        Openid: core.String("user-openid"),
+        Openid: util.Ptr("user-openid"),
     },
     // Appid / Mchid / NotifyUrl 留空时会自动回填 Config 中的默认值
 })

@@ -7,7 +7,7 @@ import (
 
 	openapi "github.com/alibabacloud-go/darabonba-openapi/v2/models"
 	teaUtil "github.com/alibabacloud-go/tea-utils/v2/service"
-	"github.com/alibabacloud-go/tea/tea"
+	"github.com/bang-go/util"
 )
 
 func TestPrepareConfig(t *testing.T) {
@@ -68,7 +68,7 @@ func TestNew(t *testing.T) {
 	if captured == nil {
 		t.Fatal("expected openapi config to be passed to factory")
 	}
-	if tea.StringValue(captured.AccessKeyId) != "ak" || tea.StringValue(captured.RegionId) != "region" || tea.StringValue(captured.SecurityToken) != "token" {
+	if util.DerefZero(captured.AccessKeyId) != "ak" || util.DerefZero(captured.RegionId) != "region" || util.DerefZero(captured.SecurityToken) != "token" {
 		t.Fatalf("unexpected openapi config: %+v", captured)
 	}
 }
@@ -92,18 +92,18 @@ func TestClientOperations(t *testing.T) {
 			t.Fatalf("expected ErrSendRequestRequired, got %v", err)
 		}
 		_, err = client.SendSms(nil, &SendSmsRequest{
-			PhoneNumbers: tea.String("13800000000"),
-			SignName:     tea.String("bang"),
-			TemplateCode: tea.String("SMS_1"),
+			PhoneNumbers: util.Ptr("13800000000"),
+			SignName:     util.Ptr("bang"),
+			TemplateCode: util.Ptr("SMS_1"),
 		})
 		if !errors.Is(err, ErrContextRequired) {
 			t.Fatalf("expected ErrContextRequired, got %v", err)
 		}
 
 		request := &SendSmsRequest{
-			PhoneNumbers: tea.String(" 13800000000 "),
-			SignName:     tea.String(" bang "),
-			TemplateCode: tea.String(" SMS_1 "),
+			PhoneNumbers: util.Ptr(" 13800000000 "),
+			SignName:     util.Ptr(" bang "),
+			TemplateCode: util.Ptr(" SMS_1 "),
 		}
 		_, err = client.SendSms(context.Background(), request)
 		if err != nil {
@@ -112,10 +112,10 @@ func TestClientOperations(t *testing.T) {
 		if fakeAPI.sendSMS.phone != "13800000000" || fakeAPI.sendSMS.template != "SMS_1" {
 			t.Fatalf("unexpected request forwarding: %+v", fakeAPI.sendSMS)
 		}
-		if got, want := tea.StringValue(request.PhoneNumbers), " 13800000000 "; got != want {
+		if got, want := util.DerefZero(request.PhoneNumbers), " 13800000000 "; got != want {
 			t.Fatalf("original request phone = %q, want %q", got, want)
 		}
-		if got, want := tea.StringValue(request.TemplateCode), " SMS_1 "; got != want {
+		if got, want := util.DerefZero(request.TemplateCode), " SMS_1 "; got != want {
 			t.Fatalf("original request template = %q, want %q", got, want)
 		}
 	})
@@ -124,9 +124,9 @@ func TestClientOperations(t *testing.T) {
 		runtime := &teaUtil.RuntimeOptions{}
 		ctx := context.WithValue(context.Background(), testContextKey("trace"), "value")
 		_, err := client.SendSmsWithOptions(ctx, &SendSmsRequest{
-			PhoneNumbers: tea.String("13800000001"),
-			SignName:     tea.String("bang"),
-			TemplateCode: tea.String("SMS_2"),
+			PhoneNumbers: util.Ptr("13800000001"),
+			SignName:     util.Ptr("bang"),
+			TemplateCode: util.Ptr("SMS_2"),
 		}, runtime)
 		if err != nil {
 			t.Fatalf("SendSmsWithOptions() error = %v", err)
@@ -142,18 +142,18 @@ func TestClientOperations(t *testing.T) {
 			t.Fatalf("expected ErrBatchRequestRequired, got %v", err)
 		}
 		_, err = client.SendBatchSms(nil, &SendBatchSmsRequest{
-			PhoneNumberJson: tea.String("[\"13800000000\"]"),
-			SignNameJson:    tea.String("[\"bang\"]"),
-			TemplateCode:    tea.String("SMS_BATCH"),
+			PhoneNumberJson: util.Ptr("[\"13800000000\"]"),
+			SignNameJson:    util.Ptr("[\"bang\"]"),
+			TemplateCode:    util.Ptr("SMS_BATCH"),
 		})
 		if !errors.Is(err, ErrContextRequired) {
 			t.Fatalf("expected ErrContextRequired, got %v", err)
 		}
 
 		request := &SendBatchSmsRequest{
-			PhoneNumberJson: tea.String(" [\"13800000000\"] "),
-			SignNameJson:    tea.String(" [\"bang\"] "),
-			TemplateCode:    tea.String(" SMS_BATCH "),
+			PhoneNumberJson: util.Ptr(" [\"13800000000\"] "),
+			SignNameJson:    util.Ptr(" [\"bang\"] "),
+			TemplateCode:    util.Ptr(" SMS_BATCH "),
 		}
 		_, err = client.SendBatchSms(context.Background(), request)
 		if err != nil {
@@ -162,7 +162,7 @@ func TestClientOperations(t *testing.T) {
 		if fakeAPI.batch.template != "SMS_BATCH" {
 			t.Fatalf("unexpected batch forwarding: %+v", fakeAPI.batch)
 		}
-		if got, want := tea.StringValue(request.TemplateCode), " SMS_BATCH "; got != want {
+		if got, want := util.DerefZero(request.TemplateCode), " SMS_BATCH "; got != want {
 			t.Fatalf("original batch template = %q, want %q", got, want)
 		}
 	})
@@ -173,16 +173,16 @@ func TestClientOperations(t *testing.T) {
 			t.Fatalf("expected ErrQueryRequestRequired, got %v", err)
 		}
 		_, err = client.QuerySendDetails(nil, &QuerySendDetailsRequest{
-			PhoneNumber: tea.String("13800000000"),
-			SendDate:    tea.String("20260323"),
+			PhoneNumber: util.Ptr("13800000000"),
+			SendDate:    util.Ptr("20260323"),
 		})
 		if !errors.Is(err, ErrContextRequired) {
 			t.Fatalf("expected ErrContextRequired, got %v", err)
 		}
 
 		request := &QuerySendDetailsRequest{
-			PhoneNumber: tea.String(" 13800000000 "),
-			SendDate:    tea.String(" 20260323 "),
+			PhoneNumber: util.Ptr(" 13800000000 "),
+			SendDate:    util.Ptr(" 20260323 "),
 		}
 		_, err = client.QuerySendDetails(context.Background(), request)
 		if err != nil {
@@ -191,7 +191,7 @@ func TestClientOperations(t *testing.T) {
 		if fakeAPI.query.phone != "13800000000" || fakeAPI.query.date != "20260323" {
 			t.Fatalf("unexpected query forwarding: %+v", fakeAPI.query)
 		}
-		if got, want := tea.StringValue(request.PhoneNumber), " 13800000000 "; got != want {
+		if got, want := util.DerefZero(request.PhoneNumber), " 13800000000 "; got != want {
 			t.Fatalf("original query phone = %q, want %q", got, want)
 		}
 	})
@@ -216,8 +216,8 @@ type fakeSMSAPI struct {
 }
 
 func (f *fakeSMSAPI) SendSmsWithContext(ctx context.Context, request *SendSmsRequest, runtime *Option) (*SendSmsResponse, error) {
-	f.sendSMS.phone = tea.StringValue(request.PhoneNumbers)
-	f.sendSMS.template = tea.StringValue(request.TemplateCode)
+	f.sendSMS.phone = util.DerefZero(request.PhoneNumbers)
+	f.sendSMS.template = util.DerefZero(request.TemplateCode)
 	f.sendSMS.runtime = runtime
 	if value, _ := ctx.Value(testContextKey("trace")).(string); value != "" {
 		f.sendSMS.ctxValue = value
@@ -226,12 +226,12 @@ func (f *fakeSMSAPI) SendSmsWithContext(ctx context.Context, request *SendSmsReq
 }
 
 func (f *fakeSMSAPI) SendBatchSmsWithContext(_ context.Context, request *SendBatchSmsRequest, _ *Option) (*SendBatchSmsResponse, error) {
-	f.batch.template = tea.StringValue(request.TemplateCode)
+	f.batch.template = util.DerefZero(request.TemplateCode)
 	return &SendBatchSmsResponse{}, nil
 }
 
 func (f *fakeSMSAPI) QuerySendDetailsWithContext(_ context.Context, request *QuerySendDetailsRequest, _ *Option) (*QuerySendDetailsResponse, error) {
-	f.query.phone = tea.StringValue(request.PhoneNumber)
-	f.query.date = tea.StringValue(request.SendDate)
+	f.query.phone = util.DerefZero(request.PhoneNumber)
+	f.query.date = util.DerefZero(request.SendDate)
 	return &QuerySendDetailsResponse{}, nil
 }

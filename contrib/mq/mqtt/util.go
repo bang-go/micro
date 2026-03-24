@@ -2,11 +2,13 @@ package mqtt
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha1"
+	"encoding/base64"
 	"fmt"
 	"strings"
 	"time"
 
-	"github.com/bang-go/util/cipher"
 	pahomqtt "github.com/eclipse/paho.mqtt.golang"
 )
 
@@ -15,7 +17,9 @@ func BuildUsername(authMode, accessKeyID, instanceID string) string {
 }
 
 func BuildSignaturePassword(clientID, accessKeySecret string) string {
-	return cipher.HmacSha1(accessKeySecret, clientID)
+	hash := hmac.New(sha1.New, []byte(accessKeySecret))
+	_, _ = hash.Write([]byte(clientID))
+	return base64.StdEncoding.EncodeToString(hash.Sum(nil))
 }
 
 func BuildClientID(groupID, deviceID string) string {

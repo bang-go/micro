@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/bang-go/util"
 	"github.com/go-pay/gopay"
 	gopayalipay "github.com/go-pay/gopay/alipay"
 )
@@ -293,14 +294,14 @@ func prepareConfig(cfg *Config) (*Config, error) {
 	}
 
 	if cloned.Certificate != nil {
-		certificate := *cloned.Certificate
+		certificate := util.ClonePtr(cloned.Certificate)
 		certificate.AppCertPath = strings.TrimSpace(certificate.AppCertPath)
 		certificate.RootCertPath = strings.TrimSpace(certificate.RootCertPath)
 		certificate.AlipayPublicCertPath = strings.TrimSpace(certificate.AlipayPublicCertPath)
 		if certificate.AppCertPath == "" || certificate.RootCertPath == "" || certificate.AlipayPublicCertPath == "" {
 			return nil, ErrIncompleteCertificateMode
 		}
-		cloned.Certificate = &certificate
+		cloned.Certificate = certificate
 	}
 
 	return &cloned, nil

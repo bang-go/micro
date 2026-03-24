@@ -22,10 +22,10 @@ if err != nil {
 }
 
 resp, err := client.SendSms(context.Background(), &sms.SendSmsRequest{
-    PhoneNumbers: tea.String("13800000000"),
-    SignName:     tea.String("Bang"),
-    TemplateCode: tea.String("SMS_123456789"),
-    TemplateParam: tea.String(`{"code":"9527"}`),
+    PhoneNumbers: util.Ptr("13800000000"),
+    SignName:     util.Ptr("Bang"),
+    TemplateCode: util.Ptr("SMS_123456789"),
+    TemplateParam: util.Ptr(`{"code":"9527"}`),
 })
 if err != nil {
     panic(err)

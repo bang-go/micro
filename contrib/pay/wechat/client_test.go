@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"testing"
 
+	"github.com/bang-go/util"
 	"github.com/wechatpay-apiv3/wechatpay-go/core"
 	"github.com/wechatpay-apiv3/wechatpay-go/core/auth"
 	"github.com/wechatpay-apiv3/wechatpay-go/core/notify"
@@ -147,51 +148,51 @@ func TestPrepayDefaults(t *testing.T) {
 	if _, err := cli.JsapiPrepay(context.Background(), jsapi.PrepayRequest{}); err != nil {
 		t.Fatalf("JsapiPrepay() error = %v", err)
 	}
-	if got := stringValue(fakePayments.jsapiReq.Appid); got != "app-id" {
+	if got := util.DerefZero(fakePayments.jsapiReq.Appid); got != "app-id" {
 		t.Fatalf("expected jsapi appid, got %q", got)
 	}
-	if got := stringValue(fakePayments.jsapiReq.Mchid); got != "mch-id" {
+	if got := util.DerefZero(fakePayments.jsapiReq.Mchid); got != "mch-id" {
 		t.Fatalf("expected jsapi mchid, got %q", got)
 	}
-	if got := stringValue(fakePayments.jsapiReq.NotifyUrl); got != "https://notify.example.com" {
+	if got := util.DerefZero(fakePayments.jsapiReq.NotifyUrl); got != "https://notify.example.com" {
 		t.Fatalf("expected jsapi notify url, got %q", got)
 	}
 
 	if _, err := cli.NativePrepay(context.Background(), native.PrepayRequest{}); err != nil {
 		t.Fatalf("NativePrepay() error = %v", err)
 	}
-	if got := stringValue(fakePayments.nativeReq.Appid); got != "app-id" {
+	if got := util.DerefZero(fakePayments.nativeReq.Appid); got != "app-id" {
 		t.Fatalf("expected native appid, got %q", got)
 	}
 
 	if _, err := cli.AppPrepay(context.Background(), app.PrepayRequest{}); err != nil {
 		t.Fatalf("AppPrepay() error = %v", err)
 	}
-	if got := stringValue(fakePayments.appReq.Appid); got != "app-id" {
+	if got := util.DerefZero(fakePayments.appReq.Appid); got != "app-id" {
 		t.Fatalf("expected app appid, got %q", got)
 	}
 
 	if _, err := cli.H5Prepay(context.Background(), h5.PrepayRequest{}); err != nil {
 		t.Fatalf("H5Prepay() error = %v", err)
 	}
-	if got := stringValue(fakePayments.h5Req.Appid); got != "app-id" {
+	if got := util.DerefZero(fakePayments.h5Req.Appid); got != "app-id" {
 		t.Fatalf("expected h5 appid, got %q", got)
 	}
 
 	if _, err := cli.JsapiPrepay(context.Background(), jsapi.PrepayRequest{
-		Appid:     core.String(" "),
-		Mchid:     core.String(" mch-custom "),
-		NotifyUrl: core.String(" "),
+		Appid:     util.Ptr(" "),
+		Mchid:     util.Ptr(" mch-custom "),
+		NotifyUrl: util.Ptr(" "),
 	}); err != nil {
 		t.Fatalf("JsapiPrepay(blank values) error = %v", err)
 	}
-	if got := stringValue(fakePayments.jsapiReq.Appid); got != "app-id" {
+	if got := util.DerefZero(fakePayments.jsapiReq.Appid); got != "app-id" {
 		t.Fatalf("expected blank appid to default, got %q", got)
 	}
-	if got := stringValue(fakePayments.jsapiReq.Mchid); got != "mch-custom" {
+	if got := util.DerefZero(fakePayments.jsapiReq.Mchid); got != "mch-custom" {
 		t.Fatalf("expected mchid to be trimmed, got %q", got)
 	}
-	if got := stringValue(fakePayments.jsapiReq.NotifyUrl); got != "https://notify.example.com" {
+	if got := util.DerefZero(fakePayments.jsapiReq.NotifyUrl); got != "https://notify.example.com" {
 		t.Fatalf("expected blank notify url to default, got %q", got)
 	}
 
@@ -203,12 +204,12 @@ func TestPrepayDefaults(t *testing.T) {
 		payments: fakePayments,
 	}
 	if _, err := noNotifyClient.JsapiPrepay(context.Background(), jsapi.PrepayRequest{
-		NotifyUrl: core.String(" "),
+		NotifyUrl: util.Ptr(" "),
 	}); err != nil {
 		t.Fatalf("JsapiPrepay(no notify default) error = %v", err)
 	}
 	if fakePayments.jsapiReq.NotifyUrl != nil {
-		t.Fatalf("expected notify url to be omitted, got %q", stringValue(fakePayments.jsapiReq.NotifyUrl))
+		t.Fatalf("expected notify url to be omitted, got %q", util.DerefZero(fakePayments.jsapiReq.NotifyUrl))
 	}
 }
 
@@ -248,21 +249,21 @@ func TestOrderRefundAndNotify(t *testing.T) {
 	if _, err := cli.QueryOrderByOutTradeNo(context.Background(), "trade-1"); err != nil {
 		t.Fatalf("QueryOrderByOutTradeNo() error = %v", err)
 	}
-	if got := stringValue(fakePayments.queryOrderReq.Mchid); got != "merchant" {
+	if got := util.DerefZero(fakePayments.queryOrderReq.Mchid); got != "merchant" {
 		t.Fatalf("expected mchid on query request, got %q", got)
 	}
 
 	if err := cli.CloseOrder(context.Background(), "trade-2"); err != nil {
 		t.Fatalf("CloseOrder() error = %v", err)
 	}
-	if got := stringValue(fakePayments.closeOrderReq.Mchid); got != "merchant" {
+	if got := util.DerefZero(fakePayments.closeOrderReq.Mchid); got != "merchant" {
 		t.Fatalf("expected mchid on close request, got %q", got)
 	}
 
 	if _, err := cli.QueryRefund(context.Background(), "refund-1"); err != nil {
 		t.Fatalf("QueryRefund() error = %v", err)
 	}
-	if got := stringValue(fakeRefunds.queryReq.OutRefundNo); got != "refund-1" {
+	if got := util.DerefZero(fakeRefunds.queryReq.OutRefundNo); got != "refund-1" {
 		t.Fatalf("expected refund number, got %q", got)
 	}
 
@@ -413,11 +414,4 @@ func (f *fakeRefundAPI) Refund(context.Context, refunddomestic.CreateRequest) (*
 func (f *fakeRefundAPI) QueryRefund(_ context.Context, req refunddomestic.QueryByOutRefundNoRequest) (*refunddomestic.Refund, error) {
 	f.queryReq = req
 	return &refunddomestic.Refund{}, nil
-}
-
-func stringValue(value *string) string {
-	if value == nil {
-		return ""
-	}
-	return *value
 }

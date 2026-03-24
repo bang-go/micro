@@ -11,7 +11,7 @@ require (
 	github.com/aliyun/credentials-go v1.4.10
 	github.com/apache/rocketmq-clients/golang/v5 v5.1.2
 	github.com/bang-go/opt v0.0.2
-	github.com/bang-go/util v0.1.4
+	github.com/bang-go/util v0.1.8
 	github.com/coder/websocket v1.8.14
 	github.com/eclipse/paho.mqtt.golang v1.5.1
 	github.com/elastic/go-elasticsearch/v9 v9.2.1

@@ -182,7 +182,3 @@ func writeError(w *bufio.Writer, message string) error {
 	_, err := fmt.Fprintf(w, "-%s\r\n", message)
 	return err
 }
-
-func boolPtr(value bool) *bool {
-	return &value
-}

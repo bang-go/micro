@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/bang-go/micro/telemetry/logger"
+	"github.com/bang-go/util"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/redis/go-redis/v9"
 	"go.opentelemetry.io/otel/attribute"
@@ -93,7 +94,7 @@ func TestPrepareConfigUsesUnixNetworkForSocketPath(t *testing.T) {
 func TestPrepareConfigAllowsExplicitIdentityEnable(t *testing.T) {
 	conf, opts, err := prepareConfig(&Config{
 		Addr:            "127.0.0.1:6379",
-		DisableIdentity: boolPtr(false),
+		DisableIdentity: util.Ptr(false),
 	})
 	if err != nil {
 		t.Fatalf("prepareConfig: %v", err)
@@ -113,7 +114,7 @@ func TestClientLifecycleWithFakeServer(t *testing.T) {
 		Name:            "cache",
 		Addr:            "pipe",
 		Protocol:        2,
-		DisableIdentity: boolPtr(true),
+		DisableIdentity: util.Ptr(true),
 		Dialer:          server.dialer,
 	})
 	if err != nil {
@@ -167,7 +168,7 @@ func TestAddHookValidationAndInvocation(t *testing.T) {
 	client, err := New(&Config{
 		Addr:            "pipe",
 		Protocol:        2,
-		DisableIdentity: boolPtr(true),
+		DisableIdentity: util.Ptr(true),
 		Dialer:          server.dialer,
 	})
 	if err != nil {
@@ -196,7 +197,7 @@ func TestPingRejectsNilContext(t *testing.T) {
 	client, err := New(&Config{
 		Addr:            "pipe",
 		Protocol:        2,
-		DisableIdentity: boolPtr(true),
+		DisableIdentity: util.Ptr(true),
 		Dialer:          server.dialer,
 	})
 	if err != nil {
@@ -326,7 +327,7 @@ func TestTraceDoesNotIncludeCommandArgsByDefault(t *testing.T) {
 		Name:            "cache",
 		Addr:            "pipe",
 		Protocol:        2,
-		DisableIdentity: boolPtr(true),
+		DisableIdentity: util.Ptr(true),
 		Dialer:          server.dialer,
 		SkipPing:        true,
 		Trace:           true,
@@ -371,7 +372,7 @@ func TestMetricsRegistererAndDisableMetrics(t *testing.T) {
 	client, err := New(&Config{
 		Addr:              "pipe",
 		Protocol:          2,
-		DisableIdentity:   boolPtr(true),
+		DisableIdentity:   util.Ptr(true),
 		Dialer:            server.dialer,
 		MetricsRegisterer: reg,
 	})
@@ -406,7 +407,7 @@ func TestMetricsRegistererAndDisableMetrics(t *testing.T) {
 	disabledClient, err := New(&Config{
 		Addr:              "pipe",
 		Protocol:          2,
-		DisableIdentity:   boolPtr(true),
+		DisableIdentity:   util.Ptr(true),
 		Dialer:            server.dialer,
 		DisableMetrics:    true,
 		MetricsRegisterer: disabledReg,

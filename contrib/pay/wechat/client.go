@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/bang-go/util"
 	"github.com/wechatpay-apiv3/wechatpay-go/core"
 	"github.com/wechatpay-apiv3/wechatpay-go/core/auth"
 	"github.com/wechatpay-apiv3/wechatpay-go/core/auth/verifiers"
@@ -222,8 +223,8 @@ func (c *client) QueryOrderByOutTradeNo(ctx context.Context, outTradeNo string) 
 	}
 
 	return c.payments.QueryOrderByOutTradeNo(ctx, jsapi.QueryOrderByOutTradeNoRequest{
-		OutTradeNo: core.String(outTradeNo),
-		Mchid:      core.String(c.config.MchID),
+		OutTradeNo: util.Ptr(outTradeNo),
+		Mchid:      util.Ptr(c.config.MchID),
 	})
 }
 
@@ -237,8 +238,8 @@ func (c *client) CloseOrder(ctx context.Context, outTradeNo string) error {
 	}
 
 	return c.payments.CloseOrder(ctx, jsapi.CloseOrderRequest{
-		OutTradeNo: core.String(outTradeNo),
-		Mchid:      core.String(c.config.MchID),
+		OutTradeNo: util.Ptr(outTradeNo),
+		Mchid:      util.Ptr(c.config.MchID),
 	})
 }
 
@@ -259,7 +260,7 @@ func (c *client) QueryRefund(ctx context.Context, outRefundNo string) (*refunddo
 	}
 
 	return c.refunds.QueryRefund(ctx, refunddomestic.QueryByOutRefundNoRequest{
-		OutRefundNo: core.String(outRefundNo),
+		OutRefundNo: util.Ptr(outRefundNo),
 	})
 }
 
@@ -346,7 +347,7 @@ func applyStringDefault(target **string, fallback string) {
 		return
 	}
 	if *target == nil {
-		*target = core.String(fallback)
+		*target = util.Ptr(fallback)
 		return
 	}
 
@@ -356,11 +357,11 @@ func applyStringDefault(target **string, fallback string) {
 			*target = nil
 			return
 		}
-		*target = core.String(fallback)
+		*target = util.Ptr(fallback)
 		return
 	}
 	if value != **target {
-		*target = core.String(value)
+		*target = util.Ptr(value)
 	}
 }
 

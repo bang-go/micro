@@ -8,6 +8,7 @@ import (
 
 	rmqClient "github.com/apache/rocketmq-clients/golang/v5"
 	"github.com/bang-go/micro/telemetry/logger"
+	"github.com/bang-go/util"
 )
 
 const (
@@ -71,8 +72,7 @@ func cloneSubscriptions(src map[string]*FilterExpression) (map[string]*FilterExp
 			cloned[normalizedTopic] = nil
 			continue
 		}
-		expr := *expression
-		cloned[normalizedTopic] = &expr
+		cloned[normalizedTopic] = util.ClonePtr(expression)
 	}
 	return cloned, nil
 }
@@ -93,10 +93,7 @@ func cloneMessage(message *Message) *Message {
 	cloned := *message
 	cloned.Topic = strings.TrimSpace(message.Topic)
 	cloned.Body = append([]byte(nil), message.Body...)
-	if message.Tag != nil {
-		tag := *message.Tag
-		cloned.Tag = &tag
-	}
+	cloned.Tag = util.ClonePtr(message.Tag)
 	if keys := message.GetKeys(); len(keys) > 0 {
 		cloned.SetKeys(append([]string(nil), keys...)...)
 	}
