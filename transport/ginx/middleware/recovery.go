@@ -1,9 +1,10 @@
-package ginx
+package middleware
 
 import (
+	"errors"
+	"fmt"
 	"net"
 	"net/http"
-	"net/http/httputil"
 	"os"
 	"runtime/debug"
 	"strings"
@@ -12,49 +13,70 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// RecoveryMiddleware returns a gin.HandlerFunc (middleware) that recovers from any panic and logs requests using micro/logger
-func RecoveryMiddleware(log *logger.Logger, stack bool) gin.HandlerFunc {
+func RecoveryMiddleware(log *logger.Logger) gin.HandlerFunc {
+	if log == nil {
+		log = logger.New(logger.WithLevel("info"))
+	}
+
 	return func(c *gin.Context) {
 		defer func() {
-			if err := recover(); err != nil {
-				// Check for a broken connection, as it is not really a
-				// condition that warrants a panic stack trace.
-				var brokenPipe bool
-				if ne, ok := err.(*net.OpError); ok {
-					if se, ok := ne.Err.(*os.SyscallError); ok {
-						if strings.Contains(strings.ToLower(se.Error()), "broken pipe") || strings.Contains(strings.ToLower(se.Error()), "connection reset by peer") {
-							brokenPipe = true
-						}
-					}
-				}
+			if recovered := recover(); recovered != nil {
+				errValue := recoveredError(recovered)
 
-				httpRequest, _ := httputil.DumpRequest(c.Request, false)
-				if brokenPipe {
-					log.Error(c.Request.Context(), c.Request.URL.Path,
-						"error", err,
-						"request", string(httpRequest),
+				if isBrokenPipe(errValue) {
+					log.Error(c.Request.Context(), "http_server_connection_error",
+						"error", errValue,
+						"method", c.Request.Method,
+						"path", c.Request.URL.Path,
+						"route", routeLabel(c),
+						"remote_addr", c.ClientIP(),
 					)
-					// If the connection is dead, we can't write a status to it.
-					_ = c.Error(err.(error)) // nolint: errcheck
+					_ = c.Error(errValue)
 					c.Abort()
 					return
 				}
 
-				if stack {
-					log.Error(c.Request.Context(), "[Recovery from panic]",
-						"error", err,
-						"request", string(httpRequest),
-						"stack", string(debug.Stack()),
-					)
-				} else {
-					log.Error(c.Request.Context(), "[Recovery from panic]",
-						"error", err,
-						"request", string(httpRequest),
-					)
+				_ = c.Error(errValue)
+				log.Error(c.Request.Context(), "http_server_panic_recovered",
+					"error", errValue,
+					"method", c.Request.Method,
+					"path", c.Request.URL.Path,
+					"route", routeLabel(c),
+					"remote_addr", c.ClientIP(),
+					"stack", string(debug.Stack()),
+				)
+				if !c.Writer.Written() {
+					c.AbortWithStatus(http.StatusInternalServerError)
+					return
 				}
-				c.AbortWithStatus(http.StatusInternalServerError)
+				c.Abort()
 			}
 		}()
 		c.Next()
 	}
+}
+
+func recoveredError(recovered any) error {
+	if err, ok := recovered.(error); ok {
+		return err
+	}
+	return errors.New(fmt.Sprint(recovered))
+}
+
+func isBrokenPipe(err error) bool {
+	if err == nil {
+		return false
+	}
+	var netErr *net.OpError
+	if !errors.As(err, &netErr) {
+		return false
+	}
+
+	var syscallErr *os.SyscallError
+	if !errors.As(netErr.Err, &syscallErr) {
+		return false
+	}
+
+	message := strings.ToLower(syscallErr.Error())
+	return strings.Contains(message, "broken pipe") || strings.Contains(message, "connection reset by peer")
 }

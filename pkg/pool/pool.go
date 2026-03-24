@@ -1,10 +1,12 @@
 package pool
 
 import (
+	"container/list"
 	"context"
 	"errors"
 	"fmt"
 	"log/slog"
+	"runtime/debug"
 	"sync"
 	"sync/atomic"
 
@@ -12,60 +14,62 @@ import (
 )
 
 var (
-	// ErrPoolClosed is returned when submitting to a closed pool.
-	ErrPoolClosed = errors.New("pool closed")
-	// ErrPoolFull is returned when the pool queue is full in non-blocking mode.
-	ErrPoolFull = errors.New("pool full")
+	ErrContextRequired = errors.New("pool: context is required")
+	ErrPoolClosed      = errors.New("pool: closed")
+	ErrPoolFull        = errors.New("pool: full")
+	ErrNilTask         = errors.New("pool: task is required")
 )
 
-// Pool interface defines the worker pool behaviors.
 type Pool interface {
-	// Submit submits a task to the pool.
 	Submit(task func()) error
-	// Release closes the pool and waits for workers to finish.
+	SubmitContext(context.Context, func()) error
 	Release()
-	// Running returns the number of currently running workers (processing tasks).
 	Running() int
-	// Cap returns the capacity (number of workers) of the pool.
+	Pending() int
 	Cap() int
+	IsClosed() bool
 }
 
 type pool struct {
-	cap     int32
-	running int32
-	taskC   chan func()
+	capacity int
+	options  *options
+
+	mu       sync.RWMutex
+	cond     *sync.Cond
+	queue    *list.List
+	queueCap int
+	closed   bool
+
 	wg      sync.WaitGroup
-	options *options
-	closed  int32
+	running int32
+	once    sync.Once
 }
 
-// New creates a new fixed-size worker pool.
 func New(size int, opts ...Option) (Pool, error) {
 	if size <= 0 {
-		return nil, fmt.Errorf("pool size must be positive")
+		return nil, fmt.Errorf("pool: size must be positive")
 	}
 
-	o := &options{
-		queueSize: size, // Default queue size equals pool size
+	config := &options{
+		queueSize: size,
 	}
 	for _, opt := range opts {
-		opt(o)
+		opt(config)
 	}
-
-	if o.queueSize <= 0 {
-		o.queueSize = size
+	if config.queueSize <= 0 {
+		config.queueSize = size
 	}
-
-	// Default logger if not provided
-	if o.logger == nil {
-		o.logger = logger.New(logger.WithLevel("info"))
+	if config.logger == nil {
+		config.logger = logger.New(logger.WithLevel("info"))
 	}
 
 	p := &pool{
-		cap:     int32(size),
-		taskC:   make(chan func(), o.queueSize),
-		options: o,
+		capacity: size,
+		options:  config,
+		queue:    list.New(),
+		queueCap: config.queueSize,
 	}
+	p.cond = sync.NewCond(&p.mu)
 
 	p.wg.Add(size)
 	for i := 0; i < size; i++ {
@@ -75,69 +79,140 @@ func New(size int, opts ...Option) (Pool, error) {
 	return p, nil
 }
 
-func (p *pool) Cap() int {
-	return int(p.cap)
+func (p *pool) Submit(task func()) error {
+	return p.SubmitContext(context.Background(), task)
+}
+
+func (p *pool) SubmitContext(ctx context.Context, task func()) error {
+	if task == nil {
+		return ErrNilTask
+	}
+	if ctx == nil {
+		return ErrContextRequired
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.closed {
+		return ErrPoolClosed
+	}
+
+	if p.options.nonBlocking {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if p.queue.Len() >= p.queueCap {
+			return ErrPoolFull
+		}
+		p.queue.PushBack(task)
+		p.cond.Signal()
+		return nil
+	}
+
+	stop := context.AfterFunc(ctx, func() {
+		p.mu.Lock()
+		p.cond.Broadcast()
+		p.mu.Unlock()
+	})
+	defer stop()
+
+	for !p.closed && p.queue.Len() >= p.queueCap && ctx.Err() == nil {
+		p.cond.Wait()
+	}
+
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if p.closed {
+		return ErrPoolClosed
+	}
+
+	p.queue.PushBack(task)
+	p.cond.Signal()
+	return nil
+}
+
+func (p *pool) Release() {
+	p.once.Do(func() {
+		p.mu.Lock()
+		p.closed = true
+		p.cond.Broadcast()
+		p.mu.Unlock()
+		p.wg.Wait()
+	})
 }
 
 func (p *pool) Running() int {
 	return int(atomic.LoadInt32(&p.running))
 }
 
+func (p *pool) Pending() int {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.queue.Len()
+}
+
+func (p *pool) Cap() int {
+	return p.capacity
+}
+
+func (p *pool) IsClosed() bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.closed
+}
+
 func (p *pool) worker() {
 	defer p.wg.Done()
 
-	for task := range p.taskC {
-		atomic.AddInt32(&p.running, 1)
+	for {
+		task, ok := p.nextTask()
+		if !ok {
+			return
+		}
 		p.runTask(task)
-		atomic.AddInt32(&p.running, -1)
 	}
+}
+
+func (p *pool) nextTask() (func(), bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	for p.queue.Len() == 0 && !p.closed {
+		p.cond.Wait()
+	}
+	if p.queue.Len() == 0 {
+		return nil, false
+	}
+
+	element := p.queue.Front()
+	task := element.Value.(func())
+	p.queue.Remove(element)
+	p.cond.Signal()
+	return task, true
 }
 
 func (p *pool) runTask(task func()) {
+	atomic.AddInt32(&p.running, 1)
+	defer atomic.AddInt32(&p.running, -1)
+
 	defer func() {
-		if r := recover(); r != nil {
+		if recovered := recover(); recovered != nil {
 			if p.options.panicHandler != nil {
-				p.options.panicHandler(r)
-			} else if p.options.logger != nil {
-				p.options.logger.Error(context.Background(), "worker panic", "panic", r)
-			} else {
-				// Fallback to slog default, though options.logger should be set now
-				slog.Error("worker panic", "panic", r)
+				p.options.panicHandler(recovered)
+				return
 			}
+			if p.options.logger != nil {
+				p.options.logger.Error(context.Background(), "pool worker panic", "panic", recovered, "stack", string(debug.Stack()))
+				return
+			}
+			slog.Error("pool worker panic", "panic", recovered, "stack", string(debug.Stack()))
 		}
 	}()
+
 	task()
-}
-
-func (p *pool) Submit(task func()) (err error) {
-	if atomic.LoadInt32(&p.closed) == 1 {
-		return ErrPoolClosed
-	}
-
-	// Catch panic if channel is closed while sending
-	defer func() {
-		if r := recover(); r != nil {
-			err = ErrPoolClosed
-		}
-	}()
-
-	if p.options.nonBlocking {
-		select {
-		case p.taskC <- task:
-			return nil
-		default:
-			return ErrPoolFull
-		}
-	} else {
-		p.taskC <- task
-	}
-	return nil
-}
-
-func (p *pool) Release() {
-	if !atomic.CompareAndSwapInt32(&p.closed, 0, 1) {
-		return
-	}
-	close(p.taskC)
-	p.wg.Wait()
 }

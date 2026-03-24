@@ -1,112 +1,249 @@
-package opensearchx_test
+package opensearchx
 
 import (
-	"fmt"
-	"os"
+	"context"
+	"errors"
+	"strings"
 	"testing"
-
-	"github.com/bang-go/micro/store/opensearchx"
 )
 
-func TestClient(t *testing.T) {
-	// 从环境变量读取配置，如果没有设置则跳过测试
-	endpoint := os.Getenv("OPENSEARCH_ENDPOINT")
-	accessKeyId := os.Getenv("OPENSEARCH_ACCESS_KEY_ID")
-	accessKeySecret := os.Getenv("OPENSEARCH_ACCESS_KEY_SECRET")
-	appName := os.Getenv("OPENSEARCH_APP_NAME")
+func TestPrepareConfig(t *testing.T) {
+	t.Run("validate config", func(t *testing.T) {
+		_, err := prepareConfig(nil)
+		if !errors.Is(err, ErrNilConfig) {
+			t.Fatalf("expected ErrNilConfig, got %v", err)
+		}
 
-	if endpoint == "" || accessKeyId == "" || accessKeySecret == "" || appName == "" {
-		t.Skip("跳过测试：需要设置环境变量 OPENSEARCH_ENDPOINT, OPENSEARCH_ACCESS_KEY_ID, OPENSEARCH_ACCESS_KEY_SECRET, OPENSEARCH_APP_NAME")
+		_, err = prepareConfig(&Config{})
+		if !errors.Is(err, ErrEndpointRequired) {
+			t.Fatalf("expected ErrEndpointRequired, got %v", err)
+		}
+	})
+
+	t.Run("default clean values", func(t *testing.T) {
+		cfg, err := prepareConfig(&Config{
+			Endpoint:        " opensearch-cn-hangzhou.aliyuncs.com ",
+			AccessKeyID:     " ak ",
+			AccessKeySecret: " sk ",
+		})
+		if err != nil {
+			t.Fatalf("prepareConfig() error = %v", err)
+		}
+		if cfg.Endpoint != "opensearch-cn-hangzhou.aliyuncs.com" || cfg.Protocol != defaultProtocol {
+			t.Fatalf("unexpected config defaults: %+v", cfg)
+		}
+		if cfg.ConnectTimeout != defaultConnectTimeout || cfg.ReadTimeout != defaultReadTimeout || cfg.MaxIdleConns != defaultMaxIdleConns {
+			t.Fatalf("unexpected timeout defaults: %+v", cfg)
+		}
+	})
+
+	t.Run("reject invalid protocol", func(t *testing.T) {
+		_, err := prepareConfig(&Config{
+			Endpoint:        "opensearch-cn-hangzhou.aliyuncs.com",
+			Protocol:        "ftp",
+			AccessKeyID:     "ak",
+			AccessKeySecret: "sk",
+		})
+		if !errors.Is(err, ErrInvalidProtocol) {
+			t.Fatalf("expected ErrInvalidProtocol, got %v", err)
+		}
+	})
+}
+
+func TestQueryBuilders(t *testing.T) {
+	threshold := 0.82
+	query := (&SearchRequest{
+		Query: &QueryClause{Index: "default", Value: "iphone"},
+		Filter: &FilterClause{
+			Field:    "status",
+			Operator: "=",
+			Value:    1,
+		},
+		Sort: &SortClause{
+			Field: "price",
+			Order: "-",
+		},
+		Summary: &SummaryConfig{
+			SummaryField:   "title",
+			SummaryElement: "em",
+		},
+		Hit:             20,
+		Config:          "rerank_size:200",
+		FetchFields:     "title;price",
+		VectorThreshold: &threshold,
+	}).String()
+
+	if query == "" {
+		t.Fatal("expected query string to be built")
 	}
+	for _, fragment := range []string{
+		"query=default:'iphone'",
+		"config=start:0,hit:20,format:fulljson,rerank_size:200",
+		"filter=status=1",
+		"sort=price:-",
+		"fetch_fields=title;price",
+		"summary=summary_field:title,summary_element:em",
+		"vector_threshold=0.82",
+	} {
+		if !contains(query, fragment) {
+			t.Fatalf("expected query string to contain %q, got %s", fragment, query)
+		}
+	}
+	if strings.Count(query, "config=") != 1 {
+		t.Fatalf("expected a single config clause, got %s", query)
+	}
+}
 
-	// 创建客户端
-	client, err := opensearchx.New(&opensearchx.Config{
-		Endpoint:        endpoint,
-		AccessKeyId:     accessKeyId,
-		AccessKeySecret: accessKeySecret,
+func TestClientRequestBuilding(t *testing.T) {
+	fake := &fakeRequester{
+		handler: func(req requestSpec) map[string]any {
+			switch req.Path {
+			case "/v3/openapi/apps/catalog/search":
+				return map[string]any{
+					"body": map[string]any{
+						"request_id": "req-1",
+						"status":     "OK",
+						"result": map[string]any{
+							"items": []map[string]any{{"name": "book"}},
+						},
+					},
+				}
+			case "/v3/openapi/apps/catalog/suggest/suggest/search":
+				return map[string]any{
+					"body": map[string]any{
+						"suggestions": []map[string]any{{"suggestion": "book"}},
+					},
+				}
+			case "/v3/openapi/apps/catalog/actions/hint":
+				return map[string]any{
+					"body": map[string]any{
+						"result": []map[string]any{{"hint": "book"}},
+					},
+				}
+			case "/v3/openapi/apps/catalog/actions/hot":
+				return map[string]any{
+					"body": map[string]any{
+						"result": []map[string]any{{"hot": "book"}},
+					},
+				}
+			default:
+				return map[string]any{}
+			}
+		},
+	}
+	client, err := New(&Config{
+		Endpoint:        "endpoint",
+		AccessKeyID:     "ak",
+		AccessKeySecret: "sk",
+		newRequester: func(*Config) requester {
+			return fake
+		},
 	})
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("New() error = %v", err)
 	}
 
-	modelName := ""
+	if _, err := client.Search(context.Background(), "catalog", &SearchRequest{
+		Query: &QueryClause{Index: "default", Value: "1"},
+	}); err != nil {
+		t.Fatalf("Search() error = %v", err)
+	}
+	if fake.last.Path != "/v3/openapi/apps/catalog/search" || fake.last.Query["query"] == "" {
+		t.Fatalf("unexpected search request: %+v", fake.last)
+	}
 
-	// 测试 Search 方法（结构化请求，基本查询）
-	searchReq := &opensearchx.SearchRequest{
-		Query: &opensearchx.QueryClause{
-			Index: "default",
-			Value: "1",
+	if _, err := client.Suggest(context.Background(), "catalog", "suggest", &SuggestRequest{Query: "1", Hit: 5}); err != nil {
+		t.Fatalf("Suggest() error = %v", err)
+	}
+	if fake.last.Path != "/v3/openapi/apps/catalog/suggest/suggest/search" || fake.last.Query["hit"] != "5" {
+		t.Fatalf("unexpected suggest request: %+v", fake.last)
+	}
+
+	if _, err := client.Hint(context.Background(), "catalog", &HintRequest{Hit: 3, SortType: "pv"}); err != nil {
+		t.Fatalf("Hint() error = %v", err)
+	}
+	if fake.last.Path != "/v3/openapi/apps/catalog/actions/hint" || fake.last.Query["sort_type"] != "pv" {
+		t.Fatalf("unexpected hint request: %+v", fake.last)
+	}
+
+	if _, err := client.HotSearch(context.Background(), "catalog", &HotSearchRequest{Hit: 6}); err != nil {
+		t.Fatalf("HotSearch() error = %v", err)
+	}
+	if fake.last.Path != "/v3/openapi/apps/catalog/actions/hot" || fake.last.Query["hit"] != "6" {
+		t.Fatalf("unexpected hot request: %+v", fake.last)
+	}
+
+	typed, err := SearchTyped[struct {
+		Name string `json:"name"`
+	}](client, context.Background(), "catalog", &SearchRequest{
+		Query: &QueryClause{Index: "default", Value: "1"},
+	})
+	if err != nil {
+		t.Fatalf("SearchTyped() error = %v", err)
+	}
+	if len(typed.Body.Result.Items) != 1 || typed.Body.Result.Items[0].Name != "book" {
+		t.Fatalf("unexpected typed search response: %+v", typed.Body.Result.Items)
+	}
+}
+
+func TestValidation(t *testing.T) {
+	client, err := New(&Config{
+		Endpoint:        "endpoint",
+		AccessKeyID:     "ak",
+		AccessKeySecret: "sk",
+		newRequester: func(*Config) requester {
+			return &fakeRequester{}
 		},
-		Start:  0,
-		Hit:    10,
-		Format: "fulljson",
-		// 以下子句为可选，根据实际需求添加
-		// Filter: &opensearchx.FilterClause{
-		// 	Field:    "status",
-		// 	Operator: "=",
-		// 	Value:    1,
-		// 	Logic:    "AND",
-		// },
-		// Sort: &opensearchx.SortClause{
-		// 	Field: "price",
-		// 	Order: "-",
-		// },
-		// Distinct: &opensearchx.DistinctClause{
-		// 	Key:   "user_id",
-		// 	Count: 1,
-		// 	Times: 1,
-		// },
-		// Aggregate: &opensearchx.AggregateClause{
-		// 	GroupKey: "category",
-		// 	AggFun:   "count()",
-		// },
-		// KVPairs:  "key1:value1,key2:value2",          // 自定义子句
-		// Config:   "rerank_size:200",                  // 其他配置
-	}
-	searchResult, err := client.Search(appName, searchReq)
+	})
 	if err != nil {
-		fmt.Printf("Search 失败: %v\n", err)
-	} else {
-		fmt.Printf("Search 成功: %+v\n", searchResult)
+		t.Fatalf("New() error = %v", err)
 	}
 
-	// 测试 Suggest 方法（下拉提示，结构化请求）
-	suggestReq := &opensearchx.SuggestRequest{
-		Query: "1",
-		Hit:   10,
+	if _, err := client.Search(nil, "", &SearchRequest{Query: &QueryClause{Index: "default", Value: "x"}}); !errors.Is(err, ErrContextRequired) {
+		t.Fatalf("expected ErrContextRequired, got %v", err)
 	}
-	suggestResponse, err := client.Suggest(appName, modelName, suggestReq)
-	if err != nil {
-		fmt.Printf("Suggest 失败: %v\n", err)
-	} else {
-		fmt.Printf("Suggest 成功: %+v\n", suggestResponse)
+	if _, err := client.Search(context.Background(), "", &SearchRequest{Query: &QueryClause{Index: "default", Value: "x"}}); !errors.Is(err, ErrAppNameRequired) {
+		t.Fatalf("expected ErrAppNameRequired, got %v", err)
 	}
+	if _, err := client.Search(context.Background(), "app", nil); !errors.Is(err, ErrSearchRequestRequired) {
+		t.Fatalf("expected ErrSearchRequestRequired, got %v", err)
+	}
+	if _, err := client.Suggest(nil, "app", "", &SuggestRequest{Query: "x"}); !errors.Is(err, ErrContextRequired) {
+		t.Fatalf("expected ErrContextRequired, got %v", err)
+	}
+	if _, err := client.Suggest(context.Background(), "app", "", &SuggestRequest{Query: "x"}); !errors.Is(err, ErrModelNameRequired) {
+		t.Fatalf("expected ErrModelNameRequired, got %v", err)
+	}
+	if _, err := client.Hint(nil, "app", &HintRequest{}); !errors.Is(err, ErrContextRequired) {
+		t.Fatalf("expected ErrContextRequired, got %v", err)
+	}
+	if _, err := client.HotSearch(nil, "app", &HotSearchRequest{}); !errors.Is(err, ErrContextRequired) {
+		t.Fatalf("expected ErrContextRequired, got %v", err)
+	}
+	if _, err := client.Request(nil, "GET", "/path", nil, nil, nil); !errors.Is(err, ErrContextRequired) {
+		t.Fatalf("expected ErrContextRequired, got %v", err)
+	}
+	if _, err := client.Request(context.Background(), "", "/path", nil, nil, nil); !errors.Is(err, ErrRequestMethodRequired) {
+		t.Fatalf("expected ErrRequestMethodRequired, got %v", err)
+	}
+	if _, err := client.Request(context.Background(), "GET", "", nil, nil, nil); !errors.Is(err, ErrRequestPathRequired) {
+		t.Fatalf("expected ErrRequestPathRequired, got %v", err)
+	}
+}
 
-	// 测试 Hint 方法（底纹，结构化请求）
-	hintReq := &opensearchx.HintRequest{
-		Hit:      10,
-		SortType: "default",
-		// UserID:    "user123",      // 可选：用户 ID
-		// ModelName: "hint_model",   // 可选：模型名称
-	}
-	hintResponse, err := client.Hint(appName, hintReq)
-	if err != nil {
-		fmt.Printf("Hint 失败: %v\n", err)
-	} else {
-		fmt.Printf("Hint 成功: %+v\n", hintResponse)
-	}
+type fakeRequester struct {
+	last    requestSpec
+	handler func(requestSpec) map[string]any
+}
 
-	// 测试 HotSearch 方法（热搜，结构化请求）
-	hotSearchReq := &opensearchx.HotSearchRequest{
-		Hit:      10,
-		SortType: "default",
-		// UserID:    "user123",      // 可选：用户 ID
-		// ModelName: "hot_model",    // 可选：模型名称
+func (f *fakeRequester) Do(_ context.Context, req requestSpec) (map[string]any, error) {
+	f.last = req
+	if f.handler != nil {
+		return f.handler(req), nil
 	}
-	hotSearchResponse, err := client.HotSearch(appName, hotSearchReq)
-	if err != nil {
-		fmt.Printf("HotSearch 失败: %v\n", err)
-	} else {
-		fmt.Printf("HotSearch 成功: %+v\n", hotSearchResponse)
-	}
+	return map[string]any{}, nil
+}
+
+func contains(haystack, needle string) bool {
+	return strings.Contains(haystack, needle)
 }

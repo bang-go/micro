@@ -2,7 +2,14 @@ package wsx
 
 import (
 	"context"
+	"errors"
+	"net"
 	"net/http"
+	"net/url"
+	"runtime/debug"
+	"strings"
+	"sync"
+	"time"
 
 	"github.com/bang-go/micro/telemetry/logger"
 	"github.com/bang-go/opt"
@@ -18,17 +25,29 @@ type Server interface {
 
 type ServerConfig struct {
 	Addr         string
+	Listener     net.Listener
 	Logger       *logger.Logger
 	EnableLogger bool
+	Trace        bool
+	// ReadHeaderTimeout limits the time allowed to read request headers during upgrade.
+	ReadHeaderTimeout time.Duration
+	// IdleTimeout limits how long idle keep-alive HTTP connections are kept open.
+	IdleTimeout time.Duration
+	// ShutdownTimeout is used when Shutdown is called with a context that has no deadline.
+	ShutdownTimeout time.Duration
 	// ObservabilitySkipPaths 跳过可观测性记录（Metrics & Trace）的路径列表
 	// 默认为 /healthz, /metrics。用户配置将与默认值合并。
 	ObservabilitySkipPaths []string
 }
 
 type serverEntity struct {
-	config  *ServerConfig
-	options *serverOptions
-	server  *http.Server
+	config      *ServerConfig
+	options     *serverOptions
+	server      *http.Server
+	listener    net.Listener
+	mu          sync.Mutex
+	running     bool
+	connections map[Connect]struct{}
 }
 
 func NewServer(conf *ServerConfig, opts ...opt.Option[serverOptions]) Server {
@@ -38,22 +57,80 @@ func NewServer(conf *ServerConfig, opts ...opt.Option[serverOptions]) Server {
 	if conf.Logger == nil {
 		conf.Logger = logger.New(logger.WithLevel("info"))
 	}
+	if conf.ReadHeaderTimeout == 0 {
+		conf.ReadHeaderTimeout = 5 * time.Second
+	}
+	if conf.IdleTimeout == 0 {
+		conf.IdleTimeout = 30 * time.Second
+	}
+	if conf.ShutdownTimeout == 0 {
+		conf.ShutdownTimeout = 10 * time.Second
+	}
 
 	options := &serverOptions{
-		// Coder websocket defaults are usually good (no buffer size config needed typically)
-		path:        "/ws",
-		checkOrigin: func(r *http.Request) bool { return true },
+		path: "/ws",
 	}
 	opt.Each(options, opts...)
+	if options.path == "" {
+		options.path = "/ws"
+	}
+	if options.checkOrigin == nil {
+		options.checkOrigin = defaultCheckOrigin
+	}
 
 	s := &serverEntity{
-		config:  conf,
-		options: options,
+		config:      conf,
+		options:     options,
+		connections: make(map[Connect]struct{}),
 	}
 	return s
 }
 
 func (s *serverEntity) Start(ctx context.Context, handler func(context.Context, Connect)) error {
+	ctx = normalizeContext(ctx)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if handler == nil {
+		return errServerHandlerMissing
+	}
+
+	s.mu.Lock()
+	if s.running {
+		s.mu.Unlock()
+		return errServerAlreadyRunning
+	}
+
+	var (
+		lis net.Listener
+		err error
+	)
+	if s.config.Listener != nil {
+		lis = s.config.Listener
+	} else {
+		if s.config.Addr == "" {
+			s.mu.Unlock()
+			return errServerAddrMissing
+		}
+		lis, err = net.Listen("tcp", s.config.Addr)
+		if err != nil {
+			s.mu.Unlock()
+			return err
+		}
+	}
+
+	s.listener = lis
+	s.running = true
+	s.mu.Unlock()
+
+	defer func() {
+		s.mu.Lock()
+		s.running = false
+		s.server = nil
+		s.listener = nil
+		s.mu.Unlock()
+	}()
+
 	mux := http.NewServeMux()
 	// WebSocket Route
 	mux.HandleFunc(s.options.path, s.Handler(handler))
@@ -63,53 +140,124 @@ func (s *serverEntity) Start(ctx context.Context, handler func(context.Context, 
 		w.Write([]byte("OK"))
 	})
 
-	// Prepare Skip Paths (Default + User Config)
-	skipPaths := []string{"/healthz", "/metrics"}
-	skipPaths = append(skipPaths, s.config.ObservabilitySkipPaths...)
-
-	s.server = &http.Server{
-		Addr: s.config.Addr,
-		Handler: otelhttp.NewHandler(mux, "wsx",
+	finalHandler := http.Handler(mux)
+	if s.config.Trace {
+		finalHandler = otelhttp.NewHandler(mux, "wsx",
 			otelhttp.WithFilter(func(r *http.Request) bool {
-				for _, p := range skipPaths {
-					if r.URL.Path == p {
-						return false
-					}
-				}
-				return true
+				return !s.shouldSkipObservability(r.URL.Path)
 			}),
-		),
+		)
 	}
-	s.info(ctx, "ws server starting", "addr", s.config.Addr)
-	return s.server.ListenAndServe()
+
+	server := &http.Server{
+		Addr:              lis.Addr().String(),
+		Handler:           finalHandler,
+		ReadHeaderTimeout: s.config.ReadHeaderTimeout,
+		IdleTimeout:       s.config.IdleTimeout,
+	}
+	s.mu.Lock()
+	s.server = server
+	s.mu.Unlock()
+
+	serveDone := make(chan struct{})
+	defer close(serveDone)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = s.Shutdown(context.Background())
+		case <-serveDone:
+		}
+	}()
+
+	s.info(ctx, "ws server starting", "addr", lis.Addr().String())
+
+	err = server.Serve(lis)
+	if errors.Is(err, http.ErrServerClosed) {
+		return nil
+	}
+	return err
 }
 
 func (s *serverEntity) Shutdown(ctx context.Context) error {
+	ctx = normalizeContext(ctx)
+	if s.config.ShutdownTimeout > 0 {
+		if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, s.config.ShutdownTimeout)
+			defer cancel()
+		}
+	}
+
+	s.mu.Lock()
+	server := s.server
+	conns := s.snapshotConnectionsLocked()
+	s.mu.Unlock()
+
 	if s.options.hub != nil {
 		s.options.hub.Close()
 	}
-	if s.server != nil {
-		s.info(ctx, "ws server shutting down")
-		return s.server.Shutdown(ctx)
+	for _, conn := range conns {
+		_ = conn.Close()
 	}
-	return nil
+
+	if server == nil {
+		return nil
+	}
+
+	s.info(ctx, "ws server shutting down")
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- server.Shutdown(ctx)
+	}()
+
+	select {
+	case err := <-errCh:
+		if errors.Is(err, http.ErrServerClosed) {
+			return nil
+		}
+		return err
+	case <-ctx.Done():
+		closeErr := server.Close()
+		if errors.Is(closeErr, http.ErrServerClosed) {
+			closeErr = nil
+		}
+		return errors.Join(ctx.Err(), closeErr)
+	}
 }
 
 func (s *serverEntity) info(ctx context.Context, msg string, args ...any) {
 	if s.config.EnableLogger {
-		s.config.Logger.Info(ctx, msg, args...)
+		s.config.Logger.Info(normalizeContext(ctx), msg, args...)
 	}
 }
 
 func (s *serverEntity) Handler(handler func(context.Context, Connect)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		var (
+			rawConn *websocket.Conn
+			conn    Connect
+		)
+
 		// 0. Recovery
 		defer func() {
-			if err := recover(); err != nil {
+			if recovered := recover(); recovered != nil {
 				s.config.Logger.Error(r.Context(), "[ws_panic_recovery]",
-					"error", err,
+					"error", recovered,
+					"stack", string(debug.Stack()),
 					"path", r.URL.Path,
 				)
+
+				if conn != nil {
+					_ = conn.Close()
+					return
+				}
+				if rawConn != nil {
+					_ = rawConn.Close(websocket.StatusInternalError, "internal server error")
+					return
+				}
+
+				http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 			}
 		}()
 
@@ -121,16 +269,15 @@ func (s *serverEntity) Handler(handler func(context.Context, Connect)) http.Hand
 			}
 		}
 
-		// Accept options
-		acceptOpts := &websocket.AcceptOptions{
-			InsecureSkipVerify: true, // Default to true if checkOrigin is generic, but let's see.
-			// Coder's InsecureSkipVerify disables origin check.
+		userID := ""
+		if s.options.identify != nil {
+			identifiedUserID, err := s.options.identify(r.Context(), r)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusUnauthorized)
+				return
+			}
+			userID = identifiedUserID
 		}
-
-		// If user provided a specific origin check, we might need to wrap it?
-		// Coder's AcceptOptions has OriginPatterns []string
-		// It doesn't have a func(r) bool.
-		// If we want to support custom logic, we can check it before calling Accept.
 
 		if s.options.checkOrigin != nil {
 			if !s.options.checkOrigin(r) {
@@ -139,10 +286,11 @@ func (s *serverEntity) Handler(handler func(context.Context, Connect)) http.Hand
 			}
 		}
 
-		conn, err := websocket.Accept(w, r, acceptOpts)
+		// Origin verification is handled above so callers can provide arbitrary policies.
+		rawConn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
+			InsecureSkipVerify: true,
+		})
 		if err != nil {
-			// websocket.Accept handles error writing to writer?
-			// Usually yes.
 			return
 		}
 
@@ -153,43 +301,105 @@ func (s *serverEntity) Handler(handler func(context.Context, Connect)) http.Hand
 		)
 
 		// 2. Post-Handshake / OnConnect Hook
-		// Useful for binding UserID to connection immediately after upgrade
 
-		// Check Observability Skip
-		skipObservability := false
-		for _, p := range s.config.ObservabilitySkipPaths {
-			if r.URL.Path == p {
-				skipObservability = true
-				break
-			}
+		connOpts := append([]opt.Option[connectOptions](nil), s.options.connectOpts...)
+		if userID != "" {
+			connOpts = append(connOpts, WithConnectUserID(userID))
+		}
+		if s.shouldSkipObservability(r.URL.Path) {
+			connOpts = append(connOpts, withSkipObservability(true))
 		}
 
-		connOpts := s.options.connectOpts
-		if skipObservability {
-			connOpts = append(connOpts, WithSkipObservability(true))
-		}
-
-		c := NewConnect(conn, r.RemoteAddr, connOpts...)
+		conn = NewConnect(rawConn, r.RemoteAddr, connOpts...)
+		s.trackConn(conn)
+		defer s.untrackConn(conn)
 
 		if s.options.onConnect != nil {
-			// Allow OnConnect to return error to close connection?
-			// Or just set ID.
-			// Let's pass Connect to it.
-			if err := s.options.onConnect(r.Context(), c, r); err != nil {
-				c.Close()
+			if err := s.options.onConnect(r.Context(), conn, r); err != nil {
+				_ = conn.Close()
 				return
 			}
 		}
 
 		// 3. Register to Hub if present
 		if s.options.hub != nil {
-			s.options.hub.Register(c)
-			defer s.options.hub.Unregister(c)
+			if err := s.options.hub.Register(conn); err != nil {
+				_ = conn.Close()
+				return
+			}
+			defer s.options.hub.Unregister(conn)
 		}
 
 		// Ensure connection is closed when handler returns or panics
-		defer c.Close()
+		defer conn.Close()
 
-		handler(r.Context(), c)
+		handler(r.Context(), conn)
 	}
+}
+
+func (s *serverEntity) shouldSkipObservability(path string) bool {
+	if path == "/healthz" || path == "/metrics" {
+		return true
+	}
+	for _, candidate := range s.config.ObservabilitySkipPaths {
+		if candidate == path {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *serverEntity) trackConn(conn Connect) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.connections[conn] = struct{}{}
+}
+
+func (s *serverEntity) untrackConn(conn Connect) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.connections, conn)
+}
+
+func (s *serverEntity) snapshotConnectionsLocked() []Connect {
+	conns := make([]Connect, 0, len(s.connections))
+	for conn := range s.connections {
+		conns = append(conns, conn)
+	}
+	return conns
+}
+
+func defaultCheckOrigin(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return true
+	}
+
+	u, err := url.Parse(origin)
+	if err != nil || u.Host == "" || u.Scheme == "" {
+		return false
+	}
+
+	requestScheme := "http"
+	if r.TLS != nil {
+		requestScheme = "https"
+	}
+
+	return strings.EqualFold(u.Scheme, requestScheme) &&
+		normalizeHostPort(u.Host, u.Scheme) == normalizeHostPort(r.Host, requestScheme)
+}
+
+func normalizeHostPort(hostport string, scheme string) string {
+	hostURL := &url.URL{Scheme: scheme, Host: hostport}
+	host := strings.ToLower(hostURL.Hostname())
+	port := hostURL.Port()
+	if port == "" {
+		switch strings.ToLower(scheme) {
+		case "https":
+			port = "443"
+		default:
+			port = "80"
+		}
+	}
+	return net.JoinHostPort(host, port)
 }

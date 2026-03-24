@@ -37,7 +37,7 @@ func WithNonBlocking(b bool) Option {
 	}
 }
 
-// WithQueueSize sets the size of the task queue (buffered channel).
+// WithQueueSize sets the maximum number of queued tasks.
 // If 0 or negative, it defaults to the pool size.
 func WithQueueSize(size int) Option {
 	return func(o *options) {

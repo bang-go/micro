@@ -7,11 +7,18 @@ import (
 )
 
 type connectOptions struct {
-	timeout time.Duration
+	readTimeout  time.Duration
+	writeTimeout time.Duration
 }
 
-func WithConnectTimeout(timeout time.Duration) opt.Option[connectOptions] {
+func WithReadTimeout(timeout time.Duration) opt.Option[connectOptions] {
 	return opt.OptionFunc[connectOptions](func(o *connectOptions) {
-		o.timeout = timeout
+		o.readTimeout = timeout
+	})
+}
+
+func WithWriteTimeout(timeout time.Duration) opt.Option[connectOptions] {
+	return opt.OptionFunc[connectOptions](func(o *connectOptions) {
+		o.writeTimeout = timeout
 	})
 }

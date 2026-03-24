@@ -1,177 +1,276 @@
 package mqtt
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"strings"
 	"time"
 
-	"github.com/bang-go/util"
 	pahomqtt "github.com/eclipse/paho.mqtt.golang"
 )
 
 const (
-	AuthModeSignature = "Signature" //签名模式
-	AuthModeToken     = "Token"     //Token模式
+	AuthModeSignature = "Signature"
+	AuthModeToken     = "Token"
 )
 
-var defaultProtocolVersion uint = 4
+const (
+	defaultProtocolVersion = 4
+	defaultConnectTimeout  = 30 * time.Second
+	defaultOperationWait   = 30 * time.Second
+)
+
+type AliyunAuth struct {
+	Mode            string
+	AccessKeyID     string
+	AccessKeySecret string
+	InstanceID      string
+	GroupID         string
+	DeviceID        string
+}
 
 type Config struct {
-	ClientId              string
-	Username              string
-	Password              string
-	AccessKeyId           string //如未设置username,则必填
-	AccessKeySecret       string //如未设置password,则必填
-	InstanceId            string //如未设置username,则必填
-	Endpoint              string //tcp://foobar.com:1883
-	GroupId               string //如未设置clientId,则必填
-	DeviceId              string // required if ClientId is not set
-	KeepAlive             int64
-	ConnectTimeout        time.Duration
-	ProtocolVersion       uint
-	DefaultPublishHandler *pahomqtt.MessageHandler
-	ConnectHandler        *pahomqtt.OnConnectHandler
-	ReconnectHandler      *pahomqtt.ReconnectHandler
-	ConnectLostHandler    *pahomqtt.ConnectionLostHandler
+	Brokers []string
+
+	ClientID string
+	Username string
+	Password string
+
+	Aliyun *AliyunAuth
+
+	KeepAlive       time.Duration
+	ConnectTimeout  time.Duration
+	OperationWait   time.Duration
+	ProtocolVersion uint
+	AutoReconnect   bool
+	CleanSession    bool
+	OrderMatters    bool
+
+	DefaultPublishHandler pahomqtt.MessageHandler
+	OnConnect             pahomqtt.OnConnectHandler
+	OnReconnect           pahomqtt.ReconnectHandler
+	OnConnectionLost      pahomqtt.ConnectionLostHandler
+
+	newClient func(*pahomqtt.ClientOptions) pahomqtt.Client
 }
+
 type MessageHandler = pahomqtt.MessageHandler
+
 type Client interface {
-	Disconnect(quiesce uint) // milliseconds
-	Publish(topic string, qos byte, retained bool, payload interface{}) error
-	Subscribe(topic string, qos byte, callback MessageHandler) error
-	SubscribeMultiple(filters map[string]byte, callback MessageHandler) error
-	Unsubscribe(topics ...string) error
-	AddRoute(topic string, callback MessageHandler)
+	Raw() pahomqtt.Client
+	IsConnected() bool
+	Disconnect(quiesce uint)
+	Publish(ctx context.Context, topic string, qos byte, retained bool, payload any) error
+	Subscribe(ctx context.Context, topic string, qos byte, callback MessageHandler) error
+	SubscribeMultiple(ctx context.Context, filters map[string]byte, callback MessageHandler) error
+	Unsubscribe(ctx context.Context, topics ...string) error
+	AddRoute(topic string, callback MessageHandler) error
 }
+
 type clientEntity struct {
-	mqttClient pahomqtt.Client
-	*Config
+	client        pahomqtt.Client
+	operationWait time.Duration
 }
 
-// New creates a new MQTT client
-func New(cfg *Config) (Client, error) {
-	if cfg == nil {
-		return nil, fmt.Errorf("mqtt: config is required")
-	}
-	if cfg.Endpoint == "" {
-		return nil, fmt.Errorf("mqtt: endpoint is required")
+func Open(ctx context.Context, conf *Config) (Client, error) {
+	if ctx == nil {
+		return nil, ErrContextRequired
 	}
 
-	client := &clientEntity{}
-	clientId := util.If(cfg.ClientId != "", cfg.ClientId, GetClientId(cfg.GroupId, cfg.DeviceId))
-	username := util.If(cfg.Username != "", cfg.Username, GetUsername(AuthModeSignature, cfg.AccessKeyId, cfg.InstanceId))
-	password := util.If(cfg.Password != "", cfg.Password, GetSignPassword(clientId, cfg.AccessKeySecret))
-
-	if clientId == "" {
-		return nil, fmt.Errorf("mqtt: clientId is required (or GroupId+DeviceId)")
-	}
-	if username == "" {
-		return nil, fmt.Errorf("mqtt: username is required (or AccessKeyId+InstanceId)")
-	}
-	if password == "" {
-		return nil, fmt.Errorf("mqtt: password is required (or AccessKeySecret)")
-	}
-	opts := pahomqtt.NewClientOptions()
-	opts.AddBroker(cfg.Endpoint)
-	opts.SetClientID(clientId)
-	opts.SetUsername(username)
-	opts.SetPassword(password)
-	var publishHandler = &defaultPublishHandler
-	if cfg.DefaultPublishHandler != nil {
-		publishHandler = cfg.DefaultPublishHandler
-	}
-	var connectHandler = &defaultConnectHandler
-	if cfg.ConnectHandler != nil {
-		connectHandler = cfg.ConnectHandler
-	}
-	var reconnectHandler = &defaultReconnectHandler
-	if cfg.ReconnectHandler != nil {
-		reconnectHandler = cfg.ReconnectHandler
-	}
-	var connectLostHandler = &defaultConnectLostHandler
-	if cfg.ConnectLostHandler != nil {
-		connectLostHandler = cfg.ConnectLostHandler
-	}
-	opts.SetDefaultPublishHandler(*publishHandler)
-	opts.SetAutoReconnect(true)
-	opts.OnConnect = *connectHandler
-	opts.OnConnectionLost = *connectLostHandler
-	opts.OnReconnecting = *reconnectHandler
-	if cfg.KeepAlive > 0 {
-		opts.KeepAlive = cfg.KeepAlive
-	}
-	//opts.SetProtocolVersion(util.If(cfg.ProtocolVersion > 0, cfg.ProtocolVersion, defaultProtocolVersion))
-	client.mqttClient = pahomqtt.NewClient(opts)
-
-	timeout := cfg.ConnectTimeout
-	if timeout == 0 {
-		timeout = 30 * time.Second
+	config, options, err := prepareConfig(conf)
+	if err != nil {
+		return nil, err
 	}
 
-	token := client.mqttClient.Connect()
-	if !token.WaitTimeout(timeout) {
-		return nil, fmt.Errorf("mqtt: connect timeout after %v", timeout)
+	factory := config.newClient
+	if factory == nil {
+		factory = pahomqtt.NewClient
 	}
-	if err := token.Error(); err != nil {
+
+	client := factory(options)
+	if err := waitToken(ctx, config.ConnectTimeout, client.Connect()); err != nil {
 		return nil, fmt.Errorf("mqtt: connect failed: %w", err)
 	}
 
-	return client, nil
+	return &clientEntity{
+		client:        client,
+		operationWait: config.OperationWait,
+	}, nil
 }
 
-// Publish 发布消息到指定主题
-func (s *clientEntity) Publish(topic string, qos byte, retained bool, payload interface{}) error {
-	if token := s.mqttClient.Publish(topic, qos, retained, payload); token.Wait() && token.Error() != nil {
-		return token.Error()
+func New(conf *Config) (Client, error) {
+	return Open(context.Background(), conf)
+}
+
+func (c *clientEntity) Raw() pahomqtt.Client {
+	return c.client
+}
+
+func (c *clientEntity) IsConnected() bool {
+	return c.client.IsConnected()
+}
+
+func (c *clientEntity) Disconnect(quiesce uint) {
+	c.client.Disconnect(quiesce)
+}
+
+func (c *clientEntity) Publish(ctx context.Context, topic string, qos byte, retained bool, payload any) error {
+	if ctx == nil {
+		return ErrContextRequired
 	}
+
+	topic = normalizeTopic(topic)
+	if topic == "" {
+		return ErrTopicRequired
+	}
+	return waitToken(ctx, c.operationWait, c.client.Publish(topic, qos, retained, payload))
+}
+
+func (c *clientEntity) Subscribe(ctx context.Context, topic string, qos byte, callback MessageHandler) error {
+	if ctx == nil {
+		return ErrContextRequired
+	}
+
+	topic = normalizeTopic(topic)
+	if topic == "" {
+		return ErrTopicRequired
+	}
+	return waitToken(ctx, c.operationWait, c.client.Subscribe(topic, qos, callback))
+}
+
+func (c *clientEntity) SubscribeMultiple(ctx context.Context, filters map[string]byte, callback MessageHandler) error {
+	if ctx == nil {
+		return ErrContextRequired
+	}
+
+	normalized, err := normalizeFilters(filters)
+	if err != nil {
+		return err
+	}
+	return waitToken(ctx, c.operationWait, c.client.SubscribeMultiple(normalized, callback))
+}
+
+func (c *clientEntity) Unsubscribe(ctx context.Context, topics ...string) error {
+	if ctx == nil {
+		return ErrContextRequired
+	}
+
+	normalized, err := normalizeTopics(topics)
+	if err != nil {
+		return err
+	}
+	return waitToken(ctx, c.operationWait, c.client.Unsubscribe(normalized...))
+}
+
+func (c *clientEntity) AddRoute(topic string, callback MessageHandler) error {
+	topic = normalizeTopic(topic)
+	if topic == "" {
+		return ErrTopicRequired
+	}
+	c.client.AddRoute(topic, callback)
 	return nil
 }
 
-// Subscribe 订阅指定主题
-func (s *clientEntity) Subscribe(topic string, qos byte, callback MessageHandler) error {
-	if token := s.mqttClient.Subscribe(topic, qos, callback); token.Wait() && token.Error() != nil {
-		return token.Error()
+func prepareConfig(conf *Config) (*Config, *pahomqtt.ClientOptions, error) {
+	if conf == nil {
+		return nil, nil, ErrNilConfig
 	}
-	return nil
-}
 
-// SubscribeMultiple 订阅多个主题
-func (s *clientEntity) SubscribeMultiple(filters map[string]byte, callback MessageHandler) error {
-	if token := s.mqttClient.SubscribeMultiple(filters, callback); token.Wait() && token.Error() != nil {
-		return token.Error()
+	cloned := *conf
+	cloned.Brokers = trimNonEmpty(conf.Brokers)
+	cloned.ClientID = strings.TrimSpace(cloned.ClientID)
+	cloned.Username = strings.TrimSpace(cloned.Username)
+	cloned.Password = strings.TrimSpace(cloned.Password)
+	aliyun, err := normalizeAliyunAuth(conf.Aliyun)
+	if err != nil {
+		return nil, nil, err
 	}
-	return nil
-}
-
-// Unsubscribe 取消订阅主题
-func (s *clientEntity) Unsubscribe(topics ...string) error {
-	if token := s.mqttClient.Unsubscribe(topics...); token.Wait() && token.Error() != nil {
-		return token.Error()
+	cloned.Aliyun = aliyun
+	if len(cloned.Brokers) == 0 {
+		return nil, nil, ErrBrokerRequired
 	}
-	return nil
+
+	if cloned.ConnectTimeout <= 0 {
+		cloned.ConnectTimeout = defaultConnectTimeout
+	}
+	if cloned.OperationWait <= 0 {
+		cloned.OperationWait = defaultOperationWait
+	}
+	if cloned.ProtocolVersion == 0 {
+		cloned.ProtocolVersion = defaultProtocolVersion
+	}
+
+	clientID, username, password, err := resolveCredentials(&cloned)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	options := pahomqtt.NewClientOptions()
+	for _, broker := range cloned.Brokers {
+		options.AddBroker(broker)
+	}
+	options.SetClientID(clientID)
+	options.SetUsername(username)
+	options.SetPassword(password)
+	options.SetProtocolVersion(cloned.ProtocolVersion)
+	options.SetAutoReconnect(cloned.AutoReconnect)
+	options.SetCleanSession(cloned.CleanSession)
+	options.SetOrderMatters(cloned.OrderMatters)
+	options.SetConnectTimeout(cloned.ConnectTimeout)
+
+	if cloned.KeepAlive > 0 {
+		options.SetKeepAlive(cloned.KeepAlive)
+	}
+	if cloned.DefaultPublishHandler != nil {
+		options.SetDefaultPublishHandler(cloned.DefaultPublishHandler)
+	}
+	if cloned.OnConnect != nil {
+		options.OnConnect = cloned.OnConnect
+	}
+	if cloned.OnReconnect != nil {
+		options.OnReconnecting = cloned.OnReconnect
+	}
+	if cloned.OnConnectionLost != nil {
+		options.OnConnectionLost = cloned.OnConnectionLost
+	}
+
+	return &cloned, options, nil
 }
 
-// Disconnect 断开连接
-// quiesce: 断开前的等待时间（毫秒）
-func (s *clientEntity) Disconnect(quiesce uint) {
-	s.mqttClient.Disconnect(quiesce)
+func resolveCredentials(conf *Config) (string, string, string, error) {
+	clientID := conf.ClientID
+	username := conf.Username
+	password := conf.Password
+
+	if conf.Aliyun != nil {
+		auth := *conf.Aliyun
+		if auth.Mode == "" {
+			auth.Mode = AuthModeSignature
+		}
+		if clientID == "" && auth.GroupID != "" && auth.DeviceID != "" {
+			clientID = BuildClientID(auth.GroupID, auth.DeviceID)
+		}
+		if username == "" && auth.AccessKeyID != "" && auth.InstanceID != "" {
+			username = BuildUsername(auth.Mode, auth.AccessKeyID, auth.InstanceID)
+		}
+		if password == "" && clientID != "" && auth.AccessKeySecret != "" {
+			password = BuildSignaturePassword(clientID, auth.AccessKeySecret)
+		}
+	}
+
+	switch {
+	case clientID == "":
+		return "", "", "", ErrClientIDRequired
+	case username == "":
+		return "", "", "", ErrUsernameRequired
+	case password == "":
+		return "", "", "", ErrPasswordRequired
+	default:
+		return clientID, username, password, nil
+	}
 }
 
-// AddRoute 添加路由规则
-func (s *clientEntity) AddRoute(topic string, callback MessageHandler) {
-	s.mqttClient.AddRoute(topic, callback)
-}
-
-var defaultPublishHandler pahomqtt.MessageHandler = func(client pahomqtt.Client, msg pahomqtt.Message) {
-	//fmt.Printf("Received message: %s from topic: %s\n", msg.Payload(), msg.Topic())
-}
-
-var defaultConnectHandler pahomqtt.OnConnectHandler = func(client pahomqtt.Client) {
-	//fmt.Println("Connected")
-}
-var defaultReconnectHandler pahomqtt.ReconnectHandler = func(client pahomqtt.Client, options *pahomqtt.ClientOptions) {
-	//fmt.Println("Reconnected")
-
-}
-var defaultConnectLostHandler pahomqtt.ConnectionLostHandler = func(client pahomqtt.Client, err error) {
-	//fmt.Printf("Connect lost: %v", err)
+func IsTimeout(err error) bool {
+	return errors.Is(err, context.DeadlineExceeded)
 }

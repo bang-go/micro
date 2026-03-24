@@ -1,4 +1,4 @@
-package ginx
+package middleware
 
 import (
 	"time"
@@ -7,44 +7,45 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// LoggerMiddleware returns a gin.HandlerFunc (middleware) that logs requests using micro/logger
 func LoggerMiddleware(log *logger.Logger, skipPaths ...string) gin.HandlerFunc {
-	skip := make(map[string]struct{})
-	for _, path := range skipPaths {
-		skip[path] = struct{}{}
+	if log == nil {
+		log = logger.New(logger.WithLevel("info"))
 	}
+	skip := newSkipPathSet(skipPaths)
 
 	return func(c *gin.Context) {
-		start := time.Now()
-		path := c.Request.URL.Path
-
-		// Skip logging for specified paths
-		if _, ok := skip[path]; ok {
+		if shouldSkip(skip, c.Request.URL.Path) {
 			c.Next()
 			return
 		}
 
-		query := c.Request.URL.RawQuery
-
+		start := time.Now()
 		c.Next()
 
-		end := time.Now()
-		latency := end.Sub(start)
-
-		if len(c.Errors) > 0 {
-			for _, e := range c.Errors.Errors() {
-				log.Error(c.Request.Context(), e)
-			}
-		} else {
-			log.Info(c.Request.Context(), "access_log",
-				"status", c.Writer.Status(),
-				"method", c.Request.Method,
-				"path", path,
-				"query", query,
-				"ip", c.ClientIP(),
-				"user-agent", c.Request.UserAgent(),
-				"cost", latency.Seconds(),
-			)
+		fields := []any{
+			"status", c.Writer.Status(),
+			"method", c.Request.Method,
+			"path", c.Request.URL.Path,
+			"route", routeLabel(c),
+			"bytes", bytesWritten(c.Writer.Size()),
+			"remote_addr", c.ClientIP(),
+			"user_agent", c.Request.UserAgent(),
+			"duration", time.Since(start).Seconds(),
 		}
+		if len(c.Errors) > 0 {
+			fields = append(fields, "errors", c.Errors.String())
+		}
+
+		status := c.Writer.Status()
+		if status >= 500 {
+			log.Error(c.Request.Context(), "http_server_request", fields...)
+			return
+		}
+		if status >= 400 || len(c.Errors) > 0 {
+			log.Warn(c.Request.Context(), "http_server_request", fields...)
+			return
+		}
+
+		log.Info(c.Request.Context(), "http_server_request", fields...)
 	}
 }

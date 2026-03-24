@@ -1,80 +1,77 @@
 # Bang Micro
 
-Bang Micro 是一个生产级别的 Go 微服务基础框架，旨在提供统一、高效、可观测的开发体验。
+Bang Micro 是一个面向生产环境的 Go 类库集，不是把所有能力塞进一个“大框架”。每个包都保持独立、显式生命周期和清晰边界，目标是让业务可以直接使用 `micro`，而不必先理解每个第三方 SDK 的坑点和默认行为。
 
-## 🌟 特性
+## 设计取向
 
-*   **统一规范**：全模块采用 `x` 后缀命名（如 `httpx`, `grpcx`），避免命名冲突，风格统一。
-*   **生产就绪**：内置 OpenTelemetry 链路追踪、Prometheus 监控指标、结构化日志。
-*   **弹性设计**：默认集成超时控制、Panic 恢复、连接池优化。
-*   **开箱即用**：提供 HTTP、gRPC、Redis、MySQL、Elasticsearch 等常用组件的深度封装。
+- 不依赖导入时副作用。能不在 `init()` 做的事情，就不在 `init()` 做。
+- 公开 API 的生命周期显式化，启动、关闭、全局安装和请求级调用分开处理。
+- 对外运行时 API 统一要求非 nil `context.Context`，不静默回退到 `context.Background()`。
+- 在包边界处清洗和克隆调用方输入，避免把调用方对象当成内部可变状态。
+- Prometheus 指标优先按需注册、可注入、可关闭，避免污染全局默认 registry。
+- 保留底层 SDK 能力，但用更干净的默认行为、日志、trace 和错误边界包起来。
 
-## 📦 模块概览
+## 文档
 
-### Transport (通信层)
-*   [**httpx**](transport/httpx/README.md): 增强型 HTTP 客户端与服务端，支持拦截器和自动追踪。
-*   [**grpcx**](transport/grpcx/README.md): 生产级 gRPC 封装，集成拦截器链。
-*   [**ginx**](transport/ginx/README.md): 基于 Gin 的 Web 框架封装，集成统一中间件。
-*   [**tcpx**](transport/tcpx/README.md): 高性能 TCP 框架。
-*   [**wsx**](transport/wsx/README.md): WebSocket 服务端与客户端封装。
+- [文档索引](docs/README.md)
+- [迁移说明](docs/MIGRATION.md)
 
-### Store (存储层)
-*   [**gormx**](store/gormx/README.md): GORM 封装，集成 Tracing 和 Metrics。
-*   [**redisx**](store/redisx/README.md): Redis 客户端封装。
-*   [**elasticsearchx**](store/elasticsearchx/README.md): Elasticsearch 客户端。
-*   [**opensearchx**](store/opensearchx/README.md): Aliyun OpenSearch 客户端。
+## 模块概览
 
-### Conf (配置层)
-*   [**viperx**](conf/viperx/README.md): 基于 Viper 的配置加载器，支持环境变量覆盖。
-*   [**envx**](conf/envx/README.md): 环境检测工具 (Dev/Test/Prod)。
+### Transport
 
-## 🚀 快速开始
+- [httpx](transport/httpx/README.md): 生产级 `net/http` 客户端与服务端封装。
+- [grpcx](transport/grpcx/README.md): 干净的 gRPC 客户端、服务端与拦截器边界。
+- [ginx](transport/ginx/README.md): 基于 Gin 的服务端封装，统一 trace、metrics、recovery。
+- [wsx](transport/wsx/README.md): WebSocket 客户端、服务端、Hub、房间广播与订阅模型。
+- [tcpx](transport/tcpx/README.md): 显式生命周期的 TCP 客户端与服务端封装。
+- [udpx](transport/udpx/README.md): 面向 datagram 的 UDP 封装。
 
-### 安装
+### Store
+
+- [gormx](store/gormx/README.md): GORM 打开、连接池、trace、metrics、日志边界。
+- [redisx](store/redisx/README.md): `go-redis/v9` 单节点客户端封装。
+- [elasticsearchx](store/elasticsearchx/README.md): Elasticsearch v9 客户端封装。
+- [opensearchx](store/opensearchx/README.md): 阿里云 OpenSearch 查询与搜索封装。
+- [ossx](store/ossx/README.md): 阿里云 OSS 客户端封装。
+
+### Conf
+
+- [viperx](conf/viperx/README.md): 配置加载与环境变量覆盖。
+- [envx](conf/envx/README.md): 环境模式识别与主机名辅助工具。
+
+### Telemetry
+
+- [trace](telemetry/trace/README.md): OpenTelemetry TracerProvider 初始化与全局安装。
+- [logger](telemetry/logger/README.md): 结构化日志与 trace 上下文注入。
+
+### Contrib
+
+- [jwtx](contrib/auth/jwtx/README.md): 泛型 JWT 签发与解析封装。
+- [discovery](contrib/discovery/README.md): Nacos naming client 封装。
+- [mqtt](contrib/mq/mqtt/README.md): MQTT 客户端封装，兼容阿里云 MQTT 鉴权模式。
+- [rmq](contrib/mq/rmq/README.md): RocketMQ 5 Producer / SimpleConsumer 封装。
+- [alipay](contrib/pay/alipay/README.md): 支付宝支付封装。
+- [wechat](contrib/pay/wechat/README.md): 微信支付 v3 封装。
+- [sms](contrib/sms/README.md): 阿里云短信封装。
+
+### Runtime
+
+- [pool](pkg/pool/README.md): 有界 goroutine 池与显式背压模型。
+
+## 安装
 
 ```bash
 go get github.com/bang-go/micro
 ```
 
-### 示例：启动一个 HTTP 服务
+## 使用建议
 
-```go
-package main
+- 只想拿到 `TracerProvider` 而不改全局，用 `telemetry/trace.Open`；需要设置全局 tracer，再用 `telemetry/trace.InitTracer`。
+- 需要隔离 Prometheus registry 的包，优先注入 `MetricsRegisterer`；明确不需要指标时，用 `DisableMetrics`。
+- 如果公开方法接收 `context.Context`，就传业务上下文，不要传 nil。
+- 如果你已经熟悉底层 SDK，可以直接拿原始客户端；大多数封装都保留了 `Raw()` 或等价入口。
 
-import (
-    "github.com/bang-go/micro/transport/ginx"
-    "github.com/gin-gonic/gin"
-)
-
-func main() {
-    // 1. 创建 Server
-    server := ginx.New(&ginx.ServerConfig{
-        Addr: ":8080",
-        Name: "my-service",
-    })
-
-    // 2. 注册路由
-    server.Use(func(c *gin.Context) {
-        // 全局中间件
-        c.Next()
-    })
-    
-    g := server.GinEngine()
-    g.GET("/ping", func(c *gin.Context) {
-        c.JSON(200, gin.H{"message": "pong"})
-    })
-
-    // 3. 启动
-    if err := server.Start(); err != nil {
-        panic(err)
-    }
-}
-```
-
-## 🛠️ 贡献
-
-欢迎提交 Issue 和 Pull Request！
-
-## 📄 License
+## License
 
 MIT

@@ -1,100 +1,131 @@
 package httpx
 
 import (
-	"errors"
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
 )
 
-// Request 请求结构体
+type BasicAuth struct {
+	Username string
+	Password string
+}
+
 type Request struct {
-	Url         string            `json:"url"`          // 请求url
-	Method      string            `json:"method"`       //请求方法，GET/POST/PUT/DELETE/PATCH...
-	Params      map[string]string `json:"params"`       //Query参数
-	Body        string            `json:"body"`         //请求体
-	Headers     map[string]string `json:"headers"`      // 请求头
-	ContentType string            `json:"content_type"` //数据编码格式 //TODO:更多
-	Files       map[string]string `json:"files"`        //TODO:文件
-	Cookies     map[string]string `json:"cookies"`      //Cookies
-	//Timeout     time.Duration     `json:"timeout"`      //超时时间
+	Method string
+	URL    string
+	Query  url.Values
+	Header http.Header
+	Body   io.Reader
+
+	Cookies   []*http.Cookie
+	BasicAuth *BasicAuth
+	Host      string
 }
 
-// 设置请求方式
-func (r *Request) getMethod() (method string, err error) {
-	if r.Method == "" {
-		err = errors.New("method is empty")
-		return
+func (r *Request) Build(ctx context.Context) (*http.Request, error) {
+	if r == nil {
+		return nil, ErrNilRequest
 	}
-	method = strings.ToUpper(r.Method)
-	switch method {
-	case http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodConnect, http.MethodOptions, http.MethodTrace:
-	default:
-		err = errors.New("unknown method")
-		return
+	if err := validateContext(ctx); err != nil {
+		return nil, err
 	}
-	return
-}
 
-// 设置请求地址(拼接请求参数)
-func (r *Request) getUrl() (us string, err error) {
-	us = r.Url
-	if r.Url == "" {
-		err = errors.New("url is empty")
-		return
+	method := strings.ToUpper(strings.TrimSpace(r.Method))
+	if method == "" {
+		return nil, ErrRequestMethodRequired
 	}
-	if r.Params == nil {
-		return
+	rawURL := strings.TrimSpace(r.URL)
+	if rawURL == "" {
+		return nil, ErrRequestURLRequired
 	}
-	urlValues := url.Values{}
-	httpUrl, err := url.Parse(r.Url)
+
+	parsedURL, err := url.Parse(rawURL)
 	if err != nil {
-		return
+		return nil, fmt.Errorf("httpx: parse url: %w", err)
 	}
-	for key, value := range r.Params {
-		urlValues.Set(key, value)
+	if !parsedURL.IsAbs() || parsedURL.Host == "" {
+		return nil, ErrRequestAbsoluteURLRequired
 	}
-	httpUrl.RawQuery = urlValues.Encode()
-	us = httpUrl.String()
-	return
-}
 
-// 设置请求头
-func (r *Request) setHeaders(req *http.Request) {
-	if r.Headers == nil {
-		return
-	}
-	for key, value := range r.Headers {
-		req.Header.Add(key, value)
-	}
-}
-
-func (r *Request) setCookie(req *http.Request) {
-	if r.Cookies == nil {
-		return
-	}
-	for key, value := range r.Cookies {
-		req.AddCookie(&http.Cookie{Name: key, Value: value})
-	}
-}
-
-// 设置请求体
-func (r *Request) getBody() *strings.Reader {
-	if r.Headers == nil {
-		r.Headers = map[string]string{}
-	}
-	// 只有在有请求体时才设置 Content-Type
-	if r.Body != "" {
-		switch r.ContentType {
-		case ContentRaw:
-			// Raw 类型不设置 Content-Type，由用户自行设置
-		case ContentForm:
-			r.Headers["Content-Type"] = "application/x-www-form-urlencoded"
-		case ContentJson:
-			r.Headers["Content-Type"] = "application/json"
-		default: //默认json
-			r.Headers["Content-Type"] = "application/json"
+	query := parsedURL.Query()
+	for key, values := range r.Query {
+		for _, value := range values {
+			query.Add(key, value)
 		}
 	}
-	return strings.NewReader(r.Body)
+	parsedURL.RawQuery = query.Encode()
+
+	httpReq, err := http.NewRequestWithContext(ctx, method, parsedURL.String(), r.Body)
+	if err != nil {
+		return nil, fmt.Errorf("httpx: build request: %w", err)
+	}
+
+	httpReq.Header = cloneHeader(r.Header)
+	if r.Host != "" {
+		httpReq.Host = r.Host
+	}
+	if r.BasicAuth != nil {
+		httpReq.SetBasicAuth(r.BasicAuth.Username, r.BasicAuth.Password)
+	}
+	for _, cookie := range r.Cookies {
+		if cookie == nil {
+			continue
+		}
+		httpReq.AddCookie(cloneCookie(cookie))
+	}
+	return httpReq, nil
+}
+
+func (r *Request) SetHeader(key, value string) {
+	if r.Header == nil {
+		r.Header = make(http.Header)
+	}
+	r.Header.Set(key, value)
+}
+
+func (r *Request) AddHeader(key, value string) {
+	if r.Header == nil {
+		r.Header = make(http.Header)
+	}
+	r.Header.Add(key, value)
+}
+
+func (r *Request) AddCookie(cookie *http.Cookie) {
+	if cookie == nil {
+		return
+	}
+	r.Cookies = append(r.Cookies, cloneCookie(cookie))
+}
+
+func (r *Request) SetBody(contentType string, body []byte) {
+	body = append([]byte(nil), body...)
+	r.Body = bytes.NewReader(body)
+	if contentType != "" {
+		r.SetHeader("Content-Type", contentType)
+	}
+}
+
+func (r *Request) SetJSONBody(value any) error {
+	if r == nil {
+		return ErrNilRequest
+	}
+	body, err := json.Marshal(value)
+	if err != nil {
+		return fmt.Errorf("httpx: marshal json body: %w", err)
+	}
+	r.SetBody(ContentTypeJSON, body)
+	return nil
+}
+
+func (r *Request) SetFormBody(values url.Values) {
+	if values == nil {
+		values = url.Values{}
+	}
+	r.SetBody(ContentTypeFormURLEncoded, []byte(values.Encode()))
 }

@@ -1,49 +1,66 @@
 package httpx
 
 import (
-	"io"
+	"encoding/json"
+	"errors"
 	"net/http"
-	"strings"
+	"time"
 )
 
-// Response 响应结构体
-type Response struct {
-	StatusCode int               `json:"status_code"` // 状态码
-	Success    bool              `json:"success"`     // 响应状态
-	Content    []byte            `json:"content"`     // 响应内容-字节
-	Reason     string            `json:"reason"`      // 状态码说明
-	Elapsed    float64           `json:"elapsed"`     // 请求耗时(秒)
-	Headers    map[string]string `json:"headers"`     // 响应头
-	Cookies    map[string]string `json:"cookies"`     // 响应Cookies
-	Request    *Request          `json:"request"`     // 原始请求
+type RequestSnapshot struct {
+	Method string
+	URL    string
+	Header http.Header
+	Host   string
 }
 
-// 组装响应体
-func (r *Request) packResponse(res *http.Response, elapsed float64) (response *Response) {
-	response = &Response{
-		Request:    r,
-		Elapsed:    elapsed,
-		StatusCode: res.StatusCode,
+type Response struct {
+	StatusCode int
+	Status     string
+	Header     http.Header
+	Cookies    []*http.Cookie
+	Body       []byte
+	Duration   time.Duration
+	Request    *RequestSnapshot
+}
+
+func (r *Response) Success() bool {
+	return r != nil && r.StatusCode >= http.StatusOK && r.StatusCode < http.StatusMultipleChoices
+}
+
+func (r *Response) Text() string {
+	if r == nil {
+		return ""
 	}
-	response.Content, _ = io.ReadAll(res.Body)
-	// 安全解析状态码说明
-	statusParts := strings.SplitN(res.Status, " ", 2)
-	if len(statusParts) > 1 {
-		response.Reason = statusParts[1]
-	} else {
-		response.Reason = res.Status
+	return string(r.Body)
+}
+
+func (r *Response) DecodeJSON(dst any) error {
+	if r == nil {
+		return ErrNilResponse
 	}
-	response.Headers = map[string]string{}
-	response.Cookies = map[string]string{}
-	// 2xx 状态码都视为成功
-	if res.StatusCode >= http.StatusOK && res.StatusCode < http.StatusMultipleChoices {
-		response.Success = true
+	if dst == nil {
+		return errors.New("httpx: decode target is nil")
 	}
-	for key, value := range res.Header {
-		response.Headers[key] = strings.Join(value, ";")
+	if err := json.Unmarshal(r.Body, dst); err != nil {
+		return err
 	}
-	for _, v := range res.Cookies() {
-		response.Cookies[v.Name] = v.Value
+	return nil
+}
+
+func newResponse(req *http.Request, resp *http.Response, body []byte, duration time.Duration) *Response {
+	return &Response{
+		StatusCode: resp.StatusCode,
+		Status:     resp.Status,
+		Header:     cloneHeader(resp.Header),
+		Cookies:    cloneCookies(resp.Cookies()),
+		Body:       append([]byte(nil), body...),
+		Duration:   duration,
+		Request: &RequestSnapshot{
+			Method: req.Method,
+			URL:    redactedURLString(req.URL),
+			Header: redactHeader(req.Header),
+			Host:   req.Host,
+		},
 	}
-	return
 }

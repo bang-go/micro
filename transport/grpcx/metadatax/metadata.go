@@ -1,11 +1,10 @@
 // Copyright (c) The go-grpc-middleware Authors.
 // Licensed under the Apache License 2.0.
 
-package grpcx
+package metadatax
 
 import (
 	"context"
-	"encoding/base64"
 	"strings"
 
 	grpcMetadata "google.golang.org/grpc/metadata"
@@ -13,10 +12,6 @@ import (
 
 // MD is a convenience wrapper defining extra functions on the metadata.
 type MD grpcMetadata.MD
-
-const (
-	binHdrSuffix = "-bin"
-)
 
 // ExtractIncoming extracts an inbound metadata from the server-side context.
 //
@@ -88,52 +83,35 @@ func (m MD) ToIncoming(ctx context.Context) context.Context {
 //
 // The function is binary-key safe.
 func (m MD) Get(key string) string {
-	k, _ := encodeKeyValue(key, "")
+	k := strings.ToLower(key)
 	vv, ok := m[k]
-	if !ok {
+	if !ok || len(vv) == 0 {
 		return ""
 	}
 	return vv[0]
 }
 
-// Del retrieves a single value from the metadata.
+// Del deletes all values associated with key from metadata.
 //
 // It works analogously to httpx.Header.Del, deleting all values if they exist.
-//
-// The function is binary-key safe.
-
 func (m MD) Del(key string) MD {
-	k, _ := encodeKeyValue(key, "")
-	delete(m, k)
+	delete(m, strings.ToLower(key))
 	return m
 }
 
 // Set sets the given value in a metadata.
 //
 // It works analogously to httpx.Header.Set, overwriting all previous metadata values.
-//
-// The function is binary-key safe.
 func (m MD) Set(key string, value string) MD {
-	k, v := encodeKeyValue(key, value)
-	m[k] = []string{v}
+	m[strings.ToLower(key)] = []string{value}
 	return m
 }
 
-// Add retrieves a single value from the metadata.
+// Add appends value to any existing values associated with key.
 //
 // It works analogously to httpx.Header.Add, as it appends to any existing values associated with key.
-//
-// The function is binary-key safe.
 func (m MD) Add(key string, value string) MD {
-	k, v := encodeKeyValue(key, value)
-	m[k] = append(m[k], v)
+	key = strings.ToLower(key)
+	m[key] = append(m[key], value)
 	return m
-}
-
-func encodeKeyValue(k, v string) (string, string) {
-	k = strings.ToLower(k)
-	if strings.HasSuffix(k, binHdrSuffix) {
-		return k, base64.StdEncoding.EncodeToString([]byte(v))
-	}
-	return k, v
 }

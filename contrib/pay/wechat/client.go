@@ -2,15 +2,18 @@ package wechat
 
 import (
 	"context"
+	"crypto/rsa"
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/wechatpay-apiv3/wechatpay-go/core"
+	"github.com/wechatpay-apiv3/wechatpay-go/core/auth"
 	"github.com/wechatpay-apiv3/wechatpay-go/core/auth/verifiers"
 	"github.com/wechatpay-apiv3/wechatpay-go/core/downloader"
 	"github.com/wechatpay-apiv3/wechatpay-go/core/notify"
-	"github.com/wechatpay-apiv3/wechatpay-go/core/option"
+	coreoption "github.com/wechatpay-apiv3/wechatpay-go/core/option"
 	"github.com/wechatpay-apiv3/wechatpay-go/services/payments"
 	"github.com/wechatpay-apiv3/wechatpay-go/services/payments/app"
 	"github.com/wechatpay-apiv3/wechatpay-go/services/payments/h5"
@@ -20,225 +23,411 @@ import (
 	"github.com/wechatpay-apiv3/wechatpay-go/utils"
 )
 
-// Config 微信支付配置
+var (
+	ErrNilConfig                  = errors.New("wechat: config is required")
+	ErrContextRequired            = errors.New("wechat: context is required")
+	ErrAppIDRequired              = errors.New("wechat: app id is required")
+	ErrMchIDRequired              = errors.New("wechat: merchant id is required")
+	ErrCertificateSerialRequired  = errors.New("wechat: merchant certificate serial number is required")
+	ErrAPIv3KeyRequired           = errors.New("wechat: merchant api v3 key is required")
+	ErrPrivateKeyPathRequired     = errors.New("wechat: merchant private key path is required")
+	ErrOutTradeNoRequired         = errors.New("wechat: out trade no is required")
+	ErrOutRefundNoRequired        = errors.New("wechat: out refund no is required")
+	ErrNotifyRequestRequired      = errors.New("wechat: notify request is required")
+	ErrNotifyHandlerUninitialized = errors.New("wechat: notify handler is not initialized")
+)
+
 type Config struct {
-	AppId                      string `json:"app_id"`                        // 应用ID
-	MchId                      string `json:"mch_id"`                        // 商户号
-	MchCertificateSerialNumber string `json:"mch_certificate_serial_number"` // 商户证书序列号
-	MchAPIv3Key                string `json:"mch_api_v3_key"`                // 商户APIv3密钥
-	MchPrivateKeyPath          string `json:"mch_private_key_path"`          // 商户私钥路径
-	NotifyUrl                  string `json:"notify_url"`                    // 默认通知地址
+	AppID                      string `json:"app_id"`
+	MchID                      string `json:"mch_id"`
+	MchCertificateSerialNumber string `json:"mch_certificate_serial_number"`
+	MchAPIv3Key                string `json:"mch_api_v3_key"`
+	MchPrivateKeyPath          string `json:"mch_private_key_path"`
+	NotifyURL                  string `json:"notify_url"`
+
+	loadPrivateKey   func(string) (*rsa.PrivateKey, error)
+	newClient        func(context.Context, ...core.ClientOption) (*core.Client, error)
+	downloader       certificateRegistry
+	newNotifyHandler func(string, auth.Verifier) (notifyParser, error)
+	newPayments      func(*core.Client) paymentAPI
+	newRefunds       func(*core.Client) refundAPI
 }
 
-// Option 定义可选配置
-type Option func(*client)
+type Option func(*options)
 
-// WithHttpClient 设置自定义 HTTP Client (可用于链路追踪)
-func WithHttpClient(cli *http.Client) Option {
-	return func(c *client) {
-		c.httpClient = cli
-	}
-}
-
-// Client 微信支付客户端接口
-type Client interface {
-	// JsapiPrepay JSAPI/小程序下单
-	JsapiPrepay(ctx context.Context, req jsapi.PrepayRequest) (*jsapi.PrepayWithRequestPaymentResponse, error)
-	// NativePrepay Native扫码下单
-	NativePrepay(ctx context.Context, req native.PrepayRequest) (*native.PrepayResponse, error)
-	// AppPrepay APP下单
-	AppPrepay(ctx context.Context, req app.PrepayRequest) (*app.PrepayWithRequestPaymentResponse, error)
-	// H5Prepay H5下单
-	H5Prepay(ctx context.Context, req h5.PrepayRequest) (*h5.PrepayResponse, error)
-
-	// QueryOrderByOutTradeNo 查询订单 (通过商户订单号)
-	QueryOrderByOutTradeNo(ctx context.Context, outTradeNo string) (*payments.Transaction, error)
-	// CloseOrder 关闭订单
-	CloseOrder(ctx context.Context, outTradeNo string) error
-
-	// Refund 申请退款
-	Refund(ctx context.Context, req refunddomestic.CreateRequest) (*refunddomestic.Refund, error)
-	// QueryRefund 查询退款
-	QueryRefund(ctx context.Context, outRefundNo string) (*refunddomestic.Refund, error)
-
-	// ParseNotify 解析回调通知
-	ParseNotify(req *http.Request, content interface{}) (*notify.Request, error)
-
-	// GetClient 获取原始客户端
-	GetClient() *core.Client
-}
-
-type client struct {
-	cli        *core.Client
-	cfg        *Config
-	handler    *notify.Handler
+type options struct {
 	httpClient *http.Client
 }
 
-// New 创建微信支付客户端
+func WithHTTPClient(cli *http.Client) Option {
+	return func(o *options) {
+		o.httpClient = cli
+	}
+}
+
+func WithHttpClient(cli *http.Client) Option {
+	return WithHTTPClient(cli)
+}
+
+type Client interface {
+	JsapiPrepay(context.Context, jsapi.PrepayRequest) (*jsapi.PrepayWithRequestPaymentResponse, error)
+	NativePrepay(context.Context, native.PrepayRequest) (*native.PrepayResponse, error)
+	AppPrepay(context.Context, app.PrepayRequest) (*app.PrepayWithRequestPaymentResponse, error)
+	H5Prepay(context.Context, h5.PrepayRequest) (*h5.PrepayResponse, error)
+
+	QueryOrderByOutTradeNo(context.Context, string) (*payments.Transaction, error)
+	CloseOrder(context.Context, string) error
+
+	Refund(context.Context, refunddomestic.CreateRequest) (*refunddomestic.Refund, error)
+	QueryRefund(context.Context, string) (*refunddomestic.Refund, error)
+
+	ParseNotify(*http.Request, any) (*notify.Request, error)
+
+	Raw() *core.Client
+	GetClient() *core.Client
+}
+
+type paymentAPI interface {
+	JsapiPrepay(context.Context, jsapi.PrepayRequest) (*jsapi.PrepayWithRequestPaymentResponse, error)
+	NativePrepay(context.Context, native.PrepayRequest) (*native.PrepayResponse, error)
+	AppPrepay(context.Context, app.PrepayRequest) (*app.PrepayWithRequestPaymentResponse, error)
+	H5Prepay(context.Context, h5.PrepayRequest) (*h5.PrepayResponse, error)
+	QueryOrderByOutTradeNo(context.Context, jsapi.QueryOrderByOutTradeNoRequest) (*payments.Transaction, error)
+	CloseOrder(context.Context, jsapi.CloseOrderRequest) error
+}
+
+type refundAPI interface {
+	Refund(context.Context, refunddomestic.CreateRequest) (*refunddomestic.Refund, error)
+	QueryRefund(context.Context, refunddomestic.QueryByOutRefundNoRequest) (*refunddomestic.Refund, error)
+}
+
+type notifyParser interface {
+	ParseNotifyRequest(context.Context, *http.Request, any) (*notify.Request, error)
+}
+
+type certificateRegistry interface {
+	RegisterDownloaderWithClient(context.Context, *core.Client, string, string) error
+	GetCertificateVisitor(string) core.CertificateVisitor
+}
+
+type client struct {
+	raw      *core.Client
+	config   *Config
+	payments paymentAPI
+	refunds  refundAPI
+	handler  notifyParser
+}
+
+func Open(ctx context.Context, cfg *Config, opts ...Option) (Client, error) {
+	return New(ctx, cfg, opts...)
+}
+
 func New(ctx context.Context, cfg *Config, opts ...Option) (Client, error) {
-	if cfg == nil {
-		return nil, errors.New("config is nil")
-	}
-	if cfg.AppId == "" || cfg.MchId == "" || cfg.MchCertificateSerialNumber == "" || cfg.MchAPIv3Key == "" || cfg.MchPrivateKeyPath == "" {
-		return nil, errors.New("missing required config fields")
+	if ctx == nil {
+		return nil, ErrContextRequired
 	}
 
-	c := &client{
-		cfg: cfg,
+	config, err := prepareConfig(cfg)
+	if err != nil {
+		return nil, err
 	}
+
+	settings := options{}
 	for _, opt := range opts {
-		opt(c)
+		opt(&settings)
 	}
 
-	// 加载商户私钥
-	mchPrivateKey, err := utils.LoadPrivateKeyWithPath(cfg.MchPrivateKeyPath)
+	privateKey, err := config.loadPrivateKey(config.MchPrivateKeyPath)
 	if err != nil {
-		return nil, fmt.Errorf("load merchant private key error: %w", err)
+		return nil, fmt.Errorf("wechat: load merchant private key failed: %w", err)
 	}
 
-	// 核心配置
-	coreOpts := []core.ClientOption{
-		option.WithWechatPayAutoAuthCipher(cfg.MchId, cfg.MchCertificateSerialNumber, mchPrivateKey, cfg.MchAPIv3Key),
+	clientOptions := []core.ClientOption{
+		coreoption.WithWechatPayAutoAuthCipher(
+			config.MchID,
+			config.MchCertificateSerialNumber,
+			privateKey,
+			config.MchAPIv3Key,
+		),
+	}
+	if settings.httpClient != nil {
+		clientOptions = append(clientOptions, coreoption.WithHTTPClient(settings.httpClient))
 	}
 
-	// 注入自定义 HTTP Client
-	if c.httpClient != nil {
-		coreOpts = append(coreOpts, option.WithHTTPClient(c.httpClient))
-	}
-
-	cli, err := core.NewClient(ctx, coreOpts...)
+	raw, err := config.newClient(ctx, clientOptions...)
 	if err != nil {
-		return nil, fmt.Errorf("new wechat pay client error: %w", err)
+		return nil, fmt.Errorf("wechat: create client failed: %w", err)
 	}
-	c.cli = cli
 
-	// 初始化回调通知处理器
-	mgr := downloader.MgrInstance()
-	// 注册下载器（使用相同的 HTTP Client）
-	// 注意：RegisterDownloaderWithClient 会直接使用 client 内部的 http client，所以不需要重复注入
-	err = mgr.RegisterDownloaderWithClient(ctx, cli, cfg.MchId, cfg.MchAPIv3Key)
+	if err := config.downloader.RegisterDownloaderWithClient(ctx, raw, config.MchID, config.MchAPIv3Key); err != nil {
+		return nil, fmt.Errorf("wechat: register certificate downloader failed: %w", err)
+	}
+
+	handler, err := config.newNotifyHandler(
+		config.MchAPIv3Key,
+		verifiers.NewSHA256WithRSAVerifier(config.downloader.GetCertificateVisitor(config.MchID)),
+	)
 	if err != nil {
-		// 记录错误但不中断
+		return nil, fmt.Errorf("wechat: create notify handler failed: %w", err)
 	}
 
-	certVisitor := mgr.GetCertificateVisitor(cfg.MchId)
-	verifier := verifiers.NewSHA256WithRSAVerifier(certVisitor)
-	handler, err := notify.NewRSANotifyHandler(cfg.MchAPIv3Key, verifier)
-	if err != nil {
-		return nil, fmt.Errorf("new notify handler err: %v", err)
-	}
-	c.handler = handler
-
-	return c, nil
+	return &client{
+		raw:      raw,
+		config:   config,
+		payments: config.newPayments(raw),
+		refunds:  config.newRefunds(raw),
+		handler:  handler,
+	}, nil
 }
 
 func (c *client) JsapiPrepay(ctx context.Context, req jsapi.PrepayRequest) (*jsapi.PrepayWithRequestPaymentResponse, error) {
-	if req.Appid == nil {
-		req.Appid = core.String(c.cfg.AppId)
+	if ctx == nil {
+		return nil, ErrContextRequired
 	}
-	if req.Mchid == nil {
-		req.Mchid = core.String(c.cfg.MchId)
-	}
-	if req.NotifyUrl == nil && c.cfg.NotifyUrl != "" {
-		req.NotifyUrl = core.String(c.cfg.NotifyUrl)
-	}
-
-	svc := jsapi.JsapiApiService{Client: c.cli}
-	rsp, _, err := svc.PrepayWithRequestPayment(ctx, req)
-	return rsp, err
+	applyPrepayDefaults(&req.Appid, &req.Mchid, &req.NotifyUrl, c.config)
+	return c.payments.JsapiPrepay(ctx, req)
 }
 
 func (c *client) NativePrepay(ctx context.Context, req native.PrepayRequest) (*native.PrepayResponse, error) {
-	if req.Appid == nil {
-		req.Appid = core.String(c.cfg.AppId)
+	if ctx == nil {
+		return nil, ErrContextRequired
 	}
-	if req.Mchid == nil {
-		req.Mchid = core.String(c.cfg.MchId)
-	}
-	if req.NotifyUrl == nil && c.cfg.NotifyUrl != "" {
-		req.NotifyUrl = core.String(c.cfg.NotifyUrl)
-	}
-
-	svc := native.NativeApiService{Client: c.cli}
-	rsp, _, err := svc.Prepay(ctx, req)
-	return rsp, err
+	applyPrepayDefaults(&req.Appid, &req.Mchid, &req.NotifyUrl, c.config)
+	return c.payments.NativePrepay(ctx, req)
 }
 
 func (c *client) AppPrepay(ctx context.Context, req app.PrepayRequest) (*app.PrepayWithRequestPaymentResponse, error) {
-	if req.Appid == nil {
-		req.Appid = core.String(c.cfg.AppId)
+	if ctx == nil {
+		return nil, ErrContextRequired
 	}
-	if req.Mchid == nil {
-		req.Mchid = core.String(c.cfg.MchId)
-	}
-	if req.NotifyUrl == nil && c.cfg.NotifyUrl != "" {
-		req.NotifyUrl = core.String(c.cfg.NotifyUrl)
-	}
-
-	svc := app.AppApiService{Client: c.cli}
-	rsp, _, err := svc.PrepayWithRequestPayment(ctx, req)
-	return rsp, err
+	applyPrepayDefaults(&req.Appid, &req.Mchid, &req.NotifyUrl, c.config)
+	return c.payments.AppPrepay(ctx, req)
 }
 
 func (c *client) H5Prepay(ctx context.Context, req h5.PrepayRequest) (*h5.PrepayResponse, error) {
-	if req.Appid == nil {
-		req.Appid = core.String(c.cfg.AppId)
+	if ctx == nil {
+		return nil, ErrContextRequired
 	}
-	if req.Mchid == nil {
-		req.Mchid = core.String(c.cfg.MchId)
-	}
-	if req.NotifyUrl == nil && c.cfg.NotifyUrl != "" {
-		req.NotifyUrl = core.String(c.cfg.NotifyUrl)
-	}
-
-	svc := h5.H5ApiService{Client: c.cli}
-	rsp, _, err := svc.Prepay(ctx, req)
-	return rsp, err
+	applyPrepayDefaults(&req.Appid, &req.Mchid, &req.NotifyUrl, c.config)
+	return c.payments.H5Prepay(ctx, req)
 }
 
 func (c *client) QueryOrderByOutTradeNo(ctx context.Context, outTradeNo string) (*payments.Transaction, error) {
-	svc := jsapi.JsapiApiService{Client: c.cli}
-	req := jsapi.QueryOrderByOutTradeNoRequest{
-		OutTradeNo: core.String(outTradeNo),
-		Mchid:      core.String(c.cfg.MchId),
+	if ctx == nil {
+		return nil, ErrContextRequired
 	}
-	rsp, _, err := svc.QueryOrderByOutTradeNo(ctx, req)
-	return rsp, err
+	outTradeNo = strings.TrimSpace(outTradeNo)
+	if outTradeNo == "" {
+		return nil, ErrOutTradeNoRequired
+	}
+
+	return c.payments.QueryOrderByOutTradeNo(ctx, jsapi.QueryOrderByOutTradeNoRequest{
+		OutTradeNo: core.String(outTradeNo),
+		Mchid:      core.String(c.config.MchID),
+	})
 }
 
 func (c *client) CloseOrder(ctx context.Context, outTradeNo string) error {
-	svc := jsapi.JsapiApiService{Client: c.cli}
-	req := jsapi.CloseOrderRequest{
-		OutTradeNo: core.String(outTradeNo),
-		Mchid:      core.String(c.cfg.MchId),
+	if ctx == nil {
+		return ErrContextRequired
 	}
-	_, err := svc.CloseOrder(ctx, req)
-	return err
+	outTradeNo = strings.TrimSpace(outTradeNo)
+	if outTradeNo == "" {
+		return ErrOutTradeNoRequired
+	}
+
+	return c.payments.CloseOrder(ctx, jsapi.CloseOrderRequest{
+		OutTradeNo: core.String(outTradeNo),
+		Mchid:      core.String(c.config.MchID),
+	})
 }
 
 func (c *client) Refund(ctx context.Context, req refunddomestic.CreateRequest) (*refunddomestic.Refund, error) {
-	svc := refunddomestic.RefundsApiService{Client: c.cli}
-	rsp, _, err := svc.Create(ctx, req)
-	return rsp, err
+	if ctx == nil {
+		return nil, ErrContextRequired
+	}
+	return c.refunds.Refund(ctx, req)
 }
 
 func (c *client) QueryRefund(ctx context.Context, outRefundNo string) (*refunddomestic.Refund, error) {
-	svc := refunddomestic.RefundsApiService{Client: c.cli}
-	req := refunddomestic.QueryByOutRefundNoRequest{
-		OutRefundNo: core.String(outRefundNo),
+	if ctx == nil {
+		return nil, ErrContextRequired
 	}
-	rsp, _, err := svc.QueryByOutRefundNo(ctx, req)
-	return rsp, err
+	outRefundNo = strings.TrimSpace(outRefundNo)
+	if outRefundNo == "" {
+		return nil, ErrOutRefundNoRequired
+	}
+
+	return c.refunds.QueryRefund(ctx, refunddomestic.QueryByOutRefundNoRequest{
+		OutRefundNo: core.String(outRefundNo),
+	})
 }
 
-func (c *client) ParseNotify(req *http.Request, content interface{}) (*notify.Request, error) {
-	if c.handler == nil {
-		return nil, errors.New("notify handler is not initialized")
+func (c *client) ParseNotify(req *http.Request, content any) (*notify.Request, error) {
+	if req == nil {
+		return nil, ErrNotifyRequestRequired
 	}
-	return c.handler.ParseNotifyRequest(context.Background(), req, content)
+	if c.handler == nil {
+		return nil, ErrNotifyHandlerUninitialized
+	}
+	return c.handler.ParseNotifyRequest(req.Context(), req, content)
+}
+
+func (c *client) Raw() *core.Client {
+	return c.raw
 }
 
 func (c *client) GetClient() *core.Client {
-	return c.cli
+	return c.Raw()
+}
+
+func applyPrepayDefaults(appID, mchID, notifyURL **string, cfg *Config) {
+	applyStringDefault(appID, cfg.AppID)
+	applyStringDefault(mchID, cfg.MchID)
+	applyStringDefault(notifyURL, cfg.NotifyURL)
+}
+
+func prepareConfig(cfg *Config) (*Config, error) {
+	if cfg == nil {
+		return nil, ErrNilConfig
+	}
+
+	cloned := *cfg
+	cloned.AppID = strings.TrimSpace(cloned.AppID)
+	cloned.MchID = strings.TrimSpace(cloned.MchID)
+	cloned.MchCertificateSerialNumber = strings.TrimSpace(cloned.MchCertificateSerialNumber)
+	cloned.MchAPIv3Key = strings.TrimSpace(cloned.MchAPIv3Key)
+	cloned.MchPrivateKeyPath = strings.TrimSpace(cloned.MchPrivateKeyPath)
+	cloned.NotifyURL = strings.TrimSpace(cloned.NotifyURL)
+
+	switch {
+	case cloned.AppID == "":
+		return nil, ErrAppIDRequired
+	case cloned.MchID == "":
+		return nil, ErrMchIDRequired
+	case cloned.MchCertificateSerialNumber == "":
+		return nil, ErrCertificateSerialRequired
+	case cloned.MchAPIv3Key == "":
+		return nil, ErrAPIv3KeyRequired
+	case cloned.MchPrivateKeyPath == "":
+		return nil, ErrPrivateKeyPathRequired
+	}
+
+	if cloned.loadPrivateKey == nil {
+		cloned.loadPrivateKey = utils.LoadPrivateKeyWithPath
+	}
+	if cloned.newClient == nil {
+		cloned.newClient = core.NewClient
+	}
+	if cloned.downloader == nil {
+		cloned.downloader = certificateManagerAdapter{mgr: downloader.MgrInstance()}
+	}
+	if cloned.newNotifyHandler == nil {
+		cloned.newNotifyHandler = func(apiV3Key string, verifier auth.Verifier) (notifyParser, error) {
+			return notify.NewRSANotifyHandler(apiV3Key, verifier)
+		}
+	}
+	if cloned.newPayments == nil {
+		cloned.newPayments = func(raw *core.Client) paymentAPI {
+			return sdkPaymentAPI{raw: raw}
+		}
+	}
+	if cloned.newRefunds == nil {
+		cloned.newRefunds = func(raw *core.Client) refundAPI {
+			return sdkRefundAPI{raw: raw}
+		}
+	}
+
+	return &cloned, nil
+}
+
+func applyStringDefault(target **string, fallback string) {
+	if fallback == "" && *target == nil {
+		return
+	}
+	if *target == nil {
+		*target = core.String(fallback)
+		return
+	}
+
+	value := strings.TrimSpace(**target)
+	if value == "" {
+		if fallback == "" {
+			*target = nil
+			return
+		}
+		*target = core.String(fallback)
+		return
+	}
+	if value != **target {
+		*target = core.String(value)
+	}
+}
+
+type certificateManagerAdapter struct {
+	mgr *downloader.CertificateDownloaderMgr
+}
+
+func (a certificateManagerAdapter) RegisterDownloaderWithClient(ctx context.Context, raw *core.Client, mchID, apiV3Key string) error {
+	return a.mgr.RegisterDownloaderWithClient(ctx, raw, mchID, apiV3Key)
+}
+
+func (a certificateManagerAdapter) GetCertificateVisitor(mchID string) core.CertificateVisitor {
+	return a.mgr.GetCertificateVisitor(mchID)
+}
+
+type sdkPaymentAPI struct {
+	raw *core.Client
+}
+
+func (s sdkPaymentAPI) JsapiPrepay(ctx context.Context, req jsapi.PrepayRequest) (*jsapi.PrepayWithRequestPaymentResponse, error) {
+	service := jsapi.JsapiApiService{Client: s.raw}
+	response, _, err := service.PrepayWithRequestPayment(ctx, req)
+	return response, err
+}
+
+func (s sdkPaymentAPI) NativePrepay(ctx context.Context, req native.PrepayRequest) (*native.PrepayResponse, error) {
+	service := native.NativeApiService{Client: s.raw}
+	response, _, err := service.Prepay(ctx, req)
+	return response, err
+}
+
+func (s sdkPaymentAPI) AppPrepay(ctx context.Context, req app.PrepayRequest) (*app.PrepayWithRequestPaymentResponse, error) {
+	service := app.AppApiService{Client: s.raw}
+	response, _, err := service.PrepayWithRequestPayment(ctx, req)
+	return response, err
+}
+
+func (s sdkPaymentAPI) H5Prepay(ctx context.Context, req h5.PrepayRequest) (*h5.PrepayResponse, error) {
+	service := h5.H5ApiService{Client: s.raw}
+	response, _, err := service.Prepay(ctx, req)
+	return response, err
+}
+
+func (s sdkPaymentAPI) QueryOrderByOutTradeNo(ctx context.Context, req jsapi.QueryOrderByOutTradeNoRequest) (*payments.Transaction, error) {
+	service := jsapi.JsapiApiService{Client: s.raw}
+	response, _, err := service.QueryOrderByOutTradeNo(ctx, req)
+	return response, err
+}
+
+func (s sdkPaymentAPI) CloseOrder(ctx context.Context, req jsapi.CloseOrderRequest) error {
+	service := jsapi.JsapiApiService{Client: s.raw}
+	_, err := service.CloseOrder(ctx, req)
+	return err
+}
+
+type sdkRefundAPI struct {
+	raw *core.Client
+}
+
+func (s sdkRefundAPI) Refund(ctx context.Context, req refunddomestic.CreateRequest) (*refunddomestic.Refund, error) {
+	service := refunddomestic.RefundsApiService{Client: s.raw}
+	response, _, err := service.Create(ctx, req)
+	return response, err
+}
+
+func (s sdkRefundAPI) QueryRefund(ctx context.Context, req refunddomestic.QueryByOutRefundNoRequest) (*refunddomestic.Refund, error) {
+	service := refunddomestic.RefundsApiService{Client: s.raw}
+	response, _, err := service.QueryByOutRefundNo(ctx, req)
+	return response, err
 }

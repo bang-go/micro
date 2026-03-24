@@ -1,34 +1,64 @@
 package httpx
 
 import (
+	"net"
 	"net/http"
 	"time"
 
 	"github.com/bang-go/micro/telemetry/logger"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
-// Config defines the configuration for both Client and Server
-type Config struct {
-	// Common settings
-	Trace        bool
+type ClientConfig struct {
 	Logger       *logger.Logger
 	EnableLogger bool
+	Trace        bool
 
-	// Client specific settings
-	Timeout             time.Duration
-	MaxIdleConns        int
-	MaxIdleConnsPerHost int
-	MaxConnsPerHost     int
-	IdleConnTimeout     time.Duration
-	Transport           *http.Transport
+	Timeout time.Duration
 
-	// ObservabilitySkipPaths 跳过可观测性记录（Metrics & Trace）的路径列表
-	// 客户端无默认值，完全由用户配置。
+	HTTPClient *http.Client
+	Transport  *http.Transport
+
+	CheckRedirect func(*http.Request, []*http.Request) error
+	Jar           http.CookieJar
+
+	MaxIdleConns          int
+	MaxIdleConnsPerHost   int
+	MaxConnsPerHost       int
+	IdleConnTimeout       time.Duration
+	TLSHandshakeTimeout   time.Duration
+	ResponseHeaderTimeout time.Duration
+	ExpectContinueTimeout time.Duration
+
+	// ObservabilitySkipPaths skips metrics, tracing, and access logging for
+	// matching request paths. Client side defaults to none.
 	ObservabilitySkipPaths []string
+	MetricsRegisterer      prometheus.Registerer
+	DisableMetrics         bool
+}
 
-	// Server specific settings
-	Addr         string
-	ReadTimeout  time.Duration
-	WriteTimeout time.Duration
-	IdleTimeout  time.Duration
+type ServerConfig struct {
+	Addr     string
+	Listener net.Listener
+
+	Logger       *logger.Logger
+	EnableLogger bool
+	Trace        bool
+
+	ReadTimeout       time.Duration
+	ReadHeaderTimeout time.Duration
+	WriteTimeout      time.Duration
+	IdleTimeout       time.Duration
+	ShutdownTimeout   time.Duration
+
+	// ObservabilitySkipPaths skips metrics, tracing, and access logging for
+	// matching request paths. /metrics is always skipped; the default health
+	// path is skipped only when the framework-managed health endpoint is enabled.
+	ObservabilitySkipPaths []string
+	MetricsRegisterer      prometheus.Registerer
+	DisableMetrics         bool
+
+	DisableHealthEndpoint bool
+	HealthPath            string
+	HealthHandler         http.Handler
 }

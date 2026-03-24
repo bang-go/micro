@@ -1,6 +1,7 @@
 package pool
 
 import (
+	"context"
 	"errors"
 	"sync"
 	"sync/atomic"
@@ -8,127 +9,253 @@ import (
 	"time"
 )
 
-func TestPool_Submit(t *testing.T) {
-	p, err := New(10)
-	if err != nil {
-		t.Fatal(err)
+func TestNew(t *testing.T) {
+	_, err := New(0)
+	if err == nil {
+		t.Fatal("expected error for non-positive size")
 	}
-	defer p.Release()
+}
+
+func TestPoolSubmitAndRelease(t *testing.T) {
+	p, err := New(4)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
 
 	var count int32
 	var wg sync.WaitGroup
-	n := 100
+	const tasks = 32
+	wg.Add(tasks)
 
-	wg.Add(n)
-	for i := 0; i < n; i++ {
+	for i := 0; i < tasks; i++ {
 		err := p.Submit(func() {
 			atomic.AddInt32(&count, 1)
 			wg.Done()
 		})
 		if err != nil {
-			t.Errorf("submit failed: %v", err)
+			t.Fatalf("Submit() error = %v", err)
 		}
 	}
 
 	wg.Wait()
-	if count != int32(n) {
-		t.Errorf("expected %d, got %d", n, count)
+	p.Release()
+
+	if got := atomic.LoadInt32(&count); got != tasks {
+		t.Fatalf("expected %d tasks to run, got %d", tasks, got)
+	}
+	if !p.IsClosed() {
+		t.Fatal("expected pool to be closed after Release()")
+	}
+	if err := p.Submit(func() {}); !errors.Is(err, ErrPoolClosed) {
+		t.Fatalf("expected ErrPoolClosed after release, got %v", err)
 	}
 }
 
-func TestPool_Panic(t *testing.T) {
-	var panicked int32
-	p, _ := New(1, WithPanicHandler(func(v interface{}) {
-		atomic.StoreInt32(&panicked, 1)
-	}))
+func TestPoolSubmitContext(t *testing.T) {
+	p, err := New(1, WithQueueSize(1))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
 	defer p.Release()
 
-	var wg sync.WaitGroup
-	wg.Add(1)
-	p.Submit(func() {
-		defer wg.Done()
-		panic("oops")
-	})
+	blocker := make(chan struct{})
+	if err := p.Submit(func() { <-blocker }); err != nil {
+		t.Fatalf("Submit() error = %v", err)
+	}
+	if err := p.Submit(func() {}); err != nil {
+		t.Fatalf("Submit() error = %v", err)
+	}
 
-	wg.Wait()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	err = p.SubmitContext(ctx, func() {})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected context deadline exceeded, got %v", err)
+	}
 
-	// Handler runs in the same goroutine before next task, so it should be visible immediately after wg.Done()
-	// Actually wg.Done() is in task().
-	// Panic handler is in defer of runTask().
-	// So runTask() defer -> panic handler -> task() defer (Wait, no. task() defer runs first).
-	// task() runs. Panic.
-	// task() defers run.
-	// runTask() defers run (recover).
+	close(blocker)
+}
 
-	// So if I put wg.Done() in task defer, it runs before recover?
-	// Yes. `defer` stack.
-	// So when wg.Wait() returns, the panic handler MIGHT NOT have run yet?
-	// No, recover happens after task's defers.
-	// So panic handler runs AFTER wg.Done().
+func TestPoolSubmitContextRequiresContext(t *testing.T) {
+	p, err := New(1)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer p.Release()
 
-	// So checking `panicked` immediately might race.
-	// I should verify panicked eventually.
+	if err := p.SubmitContext(nil, func() {}); !errors.Is(err, ErrContextRequired) {
+		t.Fatalf("expected ErrContextRequired, got %v", err)
+	}
+}
 
-	for i := 0; i < 100; i++ {
+func TestPoolNonBlocking(t *testing.T) {
+	p, err := New(1, WithNonBlocking(true), WithQueueSize(1))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer p.Release()
+
+	blocker := make(chan struct{})
+	started := make(chan struct{})
+	if err := p.Submit(func() {
+		close(started)
+		<-blocker
+	}); err != nil {
+		t.Fatalf("Submit() error = %v", err)
+	}
+	<-started
+	if err := p.Submit(func() {}); err != nil {
+		t.Fatalf("Submit() error = %v", err)
+	}
+	if err := p.Submit(func() {}); !errors.Is(err, ErrPoolFull) {
+		t.Fatalf("expected ErrPoolFull, got %v", err)
+	}
+
+	close(blocker)
+}
+
+func TestPoolNonBlockingHonorsCanceledContext(t *testing.T) {
+	p, err := New(1, WithNonBlocking(true), WithQueueSize(1))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer p.Release()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if err := p.SubmitContext(ctx, func() {}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+}
+
+func TestPoolNilTask(t *testing.T) {
+	p, err := New(1)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer p.Release()
+
+	if err := p.Submit(nil); !errors.Is(err, ErrNilTask) {
+		t.Fatalf("expected ErrNilTask, got %v", err)
+	}
+}
+
+func TestPoolPanicHandler(t *testing.T) {
+	var panicked int32
+	p, err := New(1, WithPanicHandler(func(any) {
+		atomic.StoreInt32(&panicked, 1)
+	}))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer p.Release()
+
+	done := make(chan struct{})
+	if err := p.Submit(func() {
+		defer close(done)
+		panic("boom")
+	}); err != nil {
+		t.Fatalf("Submit() error = %v", err)
+	}
+	<-done
+
+	for i := 0; i < 50; i++ {
 		if atomic.LoadInt32(&panicked) == 1 {
 			return
 		}
 		time.Sleep(time.Millisecond)
 	}
-	t.Error("panic handler not called")
+	t.Fatal("expected panic handler to be invoked")
 }
 
-func TestPool_NonBlocking(t *testing.T) {
-	// Queue size 1, Pool size 1 (busy)
-	p, _ := New(1, WithNonBlocking(true), WithQueueSize(1))
+func TestPoolPendingAndRunning(t *testing.T) {
+	p, err := New(1, WithQueueSize(4))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
 	defer p.Release()
 
-	// Make worker busy
-	start := make(chan struct{})
-	done := make(chan struct{})
+	started := make(chan struct{})
+	release := make(chan struct{})
+	if err := p.Submit(func() {
+		close(started)
+		<-release
+	}); err != nil {
+		t.Fatalf("Submit() error = %v", err)
+	}
+	<-started
 
-	p.Submit(func() {
-		close(start)
-		<-done
-	})
-
-	<-start
-	// Now worker is busy.
-
-	// Fill buffer (size 1)
-	err := p.Submit(func() {})
-	if err != nil {
-		t.Errorf("expected success for buffer, got %v", err)
+	if running := p.Running(); running != 1 {
+		t.Fatalf("expected one running worker, got %d", running)
 	}
 
-	// Next should fail
-	err = p.Submit(func() {})
-	if !errors.Is(err, ErrPoolFull) {
-		t.Errorf("expected ErrPoolFull, got %v", err)
+	for i := 0; i < 3; i++ {
+		if err := p.Submit(func() {}); err != nil {
+			t.Fatalf("Submit() error = %v", err)
+		}
+	}
+	if pending := p.Pending(); pending != 3 {
+		t.Fatalf("expected 3 pending tasks, got %d", pending)
 	}
 
-	close(done)
+	close(release)
 }
 
-func TestPool_Release(t *testing.T) {
-	p, _ := New(5)
-
-	var count int32
-	for i := 0; i < 50; i++ {
-		p.Submit(func() {
-			time.Sleep(10 * time.Millisecond)
-			atomic.AddInt32(&count, 1)
-		})
+func TestPoolReleaseIsIdempotent(t *testing.T) {
+	p, err := New(2)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
 	}
-
 	p.Release()
+	p.Release()
+}
 
-	if count != 50 {
-		t.Errorf("Release did not wait for all tasks, got %d", count)
+func TestPoolReleaseUnblocksBlockingSubmit(t *testing.T) {
+	p, err := New(1, WithQueueSize(1))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
 	}
 
-	err := p.Submit(func() {})
-	if !errors.Is(err, ErrPoolClosed) {
-		t.Errorf("expected ErrPoolClosed after Release, got %v", err)
+	blocker := make(chan struct{})
+	started := make(chan struct{})
+	if err := p.Submit(func() {
+		close(started)
+		<-blocker
+	}); err != nil {
+		t.Fatalf("Submit() error = %v", err)
+	}
+	<-started
+	if err := p.Submit(func() {}); err != nil {
+		t.Fatalf("Submit() error = %v", err)
+	}
+
+	result := make(chan error, 1)
+	go func() {
+		result <- p.Submit(func() {})
+	}()
+
+	time.Sleep(20 * time.Millisecond)
+	releaseDone := make(chan struct{})
+	go func() {
+		p.Release()
+		close(releaseDone)
+	}()
+
+	select {
+	case err := <-result:
+		if !errors.Is(err, ErrPoolClosed) {
+			t.Fatalf("expected ErrPoolClosed, got %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Submit() did not unblock on Release()")
+	}
+
+	close(blocker)
+
+	select {
+	case <-releaseDone:
+	case <-time.After(time.Second):
+		t.Fatal("Release() did not complete")
 	}
 }

@@ -2,197 +2,284 @@ package redisx
 
 import (
 	"context"
-	"errors"
+	"crypto/tls"
 	"net"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/bang-go/micro/telemetry/logger"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/redis/go-redis/extra/redisotel/v9"
 	"github.com/redis/go-redis/v9"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
-var (
-	RedisRequestDuration = prometheus.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Name:    "micro_redis_request_duration_seconds",
-			Help:    "Redis request duration in seconds",
-			Buckets: []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10},
-		},
-		[]string{"addr", "command", "status"},
-	)
-
-	RedisRequestsTotal = prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Name: "micro_redis_requests_total",
-			Help: "Redis requests total",
-		},
-		[]string{"addr", "command", "status"},
-	)
+const (
+	defaultDialTimeout   = 5 * time.Second
+	defaultReadTimeout   = 3 * time.Second
+	defaultWriteTimeout  = 3 * time.Second
+	defaultPingTimeout   = 5 * time.Second
+	defaultSlowThreshold = 250 * time.Millisecond
 )
-
-func init() {
-	prometheus.MustRegister(RedisRequestDuration)
-	prometheus.MustRegister(RedisRequestsTotal)
-}
 
 type Config struct {
-	Addr            string
-	Password        string
-	DB              int
-	PoolSize        int
-	MinIdleConns    int
-	DialTimeout     time.Duration
-	ReadTimeout     time.Duration
-	WriteTimeout    time.Duration
-	Protocol        int
-	DisableIdentity bool
-	Trace           bool
-	Logger          *logger.Logger
-	EnableLogger    bool
+	Name string
+
+	Options *redis.Options
+
+	Network               string
+	Addr                  string
+	Username              string
+	Password              string
+	DB                    int
+	ClientName            string
+	Protocol              int
+	Dialer                func(context.Context, string, string) (net.Conn, error)
+	OnConnect             func(context.Context, *redis.Conn) error
+	MaxRetries            int
+	MinRetryBackoff       time.Duration
+	MaxRetryBackoff       time.Duration
+	DialTimeout           time.Duration
+	ReadTimeout           time.Duration
+	WriteTimeout          time.Duration
+	ContextTimeoutEnabled bool
+	ReadBufferSize        int
+	WriteBufferSize       int
+	PoolFIFO              bool
+	PoolSize              int
+	MinIdleConns          int
+	MaxIdleConns          int
+	MaxActiveConns        int
+	PoolTimeout           time.Duration
+	ConnMaxIdleTime       time.Duration
+	ConnMaxLifetime       time.Duration
+	TLSConfig             *tls.Config
+	DisableIdentity       *bool
+	IdentitySuffix        string
+
+	SkipPing      bool
+	PingTimeout   time.Duration
+	SlowThreshold time.Duration
+
+	Trace                   bool
+	TraceProvider           trace.TracerProvider
+	TraceAttributes         []attribute.KeyValue
+	TraceIncludeCommandArgs bool
+	TraceCaller             bool
+
+	Logger            *logger.Logger
+	EnableLogger      bool
+	DisableMetrics    bool
+	MetricsRegisterer prometheus.Registerer
 }
 
-func New(conf *Config) *redis.Client {
+type Client interface {
+	Redis() *redis.Client
+	Options() *redis.Options
+	Ping(context.Context) error
+	Stats() redis.PoolStats
+	AddHook(redis.Hook) error
+	Close() error
+}
+
+type clientEntity struct {
+	client    *redis.Client
+	options   *redis.Options
+	closeOnce sync.Once
+	closeErr  error
+}
+
+func Open(ctx context.Context, conf *Config) (Client, error) {
+	if ctx == nil {
+		return nil, ErrContextRequired
+	}
 	if conf == nil {
-		conf = &Config{}
-	}
-	if conf.Logger == nil {
-		conf.Logger = logger.New(logger.WithLevel("info"))
+		return nil, ErrNilConfig
 	}
 
-	opt := &redis.Options{
-		Addr:            conf.Addr,
-		Password:        conf.Password,
-		DB:              conf.DB,
-		PoolSize:        conf.PoolSize,
-		MinIdleConns:    conf.MinIdleConns,
-		DialTimeout:     conf.DialTimeout,
-		ReadTimeout:     conf.ReadTimeout,
-		WriteTimeout:    conf.WriteTimeout,
-		Protocol:        conf.Protocol,
-		DisableIdentity: conf.DisableIdentity,
+	config, opts, err := prepareConfig(conf)
+	if err != nil {
+		return nil, err
 	}
 
-	// Default timeouts if not set
-	if opt.DialTimeout == 0 {
-		opt.DialTimeout = 5 * time.Second
-	}
-	if opt.ReadTimeout == 0 {
-		opt.ReadTimeout = 3 * time.Second
-	}
-	if opt.WriteTimeout == 0 {
-		opt.WriteTimeout = 3 * time.Second
-	}
-
-	rdb := redis.NewClient(opt)
-
-	if conf.Trace {
-		if err := redisotel.InstrumentTracing(rdb); err != nil {
-			conf.Logger.Error(context.Background(), "redis_trace_init_failed", "error", err)
+	var metrics *metrics
+	if !config.DisableMetrics {
+		metrics = defaultRedisMetrics()
+		if config.MetricsRegisterer != nil {
+			metrics = newRedisMetrics(config.MetricsRegisterer)
 		}
 	}
 
-	// Add Hook for Observability
-	rdb.AddHook(&hook{
-		addr:         conf.Addr,
-		logger:       conf.Logger,
-		enableLogger: conf.EnableLogger,
+	rdb := redis.NewClient(opts)
+
+	client := &clientEntity{
+		client:  rdb,
+		options: cloneOptions(rdb.Options()),
+	}
+
+	if !config.SkipPing {
+		pingCtx, cancel := timeoutContext(ctx, config.PingTimeout)
+		defer cancel()
+		if err := client.Ping(pingCtx); err != nil {
+			_ = client.Close()
+			return nil, err
+		}
+	}
+
+	rdb.AddHook(newObservabilityHook(config, opts.Addr, metrics))
+
+	if config.Trace {
+		if err := redisotel.InstrumentTracing(rdb, buildTraceOptions(config)...); err != nil {
+			_ = client.Close()
+			return nil, err
+		}
+	}
+
+	return client, nil
+}
+
+func New(conf *Config) (Client, error) {
+	return Open(context.Background(), conf)
+}
+
+func (c *clientEntity) Redis() *redis.Client {
+	return c.client
+}
+
+func (c *clientEntity) Options() *redis.Options {
+	return cloneOptions(c.options)
+}
+
+func (c *clientEntity) Ping(ctx context.Context) error {
+	if ctx == nil {
+		return ErrContextRequired
+	}
+	return c.client.Ping(ctx).Err()
+}
+
+func (c *clientEntity) Stats() redis.PoolStats {
+	stats := c.client.PoolStats()
+	if stats == nil {
+		return redis.PoolStats{}
+	}
+	return *stats
+}
+
+func (c *clientEntity) AddHook(hook redis.Hook) error {
+	if hook == nil {
+		return ErrNilHook
+	}
+	c.client.AddHook(hook)
+	return nil
+}
+
+func (c *clientEntity) Close() error {
+	c.closeOnce.Do(func() {
+		c.closeErr = c.client.Close()
 	})
-
-	return rdb
+	return c.closeErr
 }
 
-type hook struct {
-	addr         string
-	logger       *logger.Logger
-	enableLogger bool
-}
-
-func (h *hook) info(ctx context.Context, msg string, args ...any) {
-	if h.enableLogger {
-		h.logger.Info(ctx, msg, args...)
+func prepareConfig(conf *Config) (*Config, *redis.Options, error) {
+	cloned := *conf
+	cloned.Name = strings.TrimSpace(cloned.Name)
+	cloned.Network = strings.TrimSpace(cloned.Network)
+	cloned.Addr = strings.TrimSpace(cloned.Addr)
+	cloned.Username = strings.TrimSpace(cloned.Username)
+	cloned.ClientName = strings.TrimSpace(cloned.ClientName)
+	cloned.IdentitySuffix = strings.TrimSpace(cloned.IdentitySuffix)
+	cloned.TraceAttributes = append([]attribute.KeyValue(nil), cloned.TraceAttributes...)
+	cloned.Logger = defaultLogger(cloned.Logger)
+	if cloned.PingTimeout == 0 {
+		cloned.PingTimeout = defaultPingTimeout
 	}
-}
-
-func (h *hook) error(ctx context.Context, msg string, args ...any) {
-	h.logger.Error(ctx, msg, args...)
-}
-
-func (h *hook) DialHook(next redis.DialHook) redis.DialHook {
-	return func(ctx context.Context, network, addr string) (net.Conn, error) {
-		return next(ctx, network, addr)
+	if cloned.SlowThreshold == 0 {
+		cloned.SlowThreshold = defaultSlowThreshold
 	}
+
+	var opts *redis.Options
+	if cloned.Options != nil {
+		opts = cloneOptions(cloned.Options)
+		if cloned.DisableIdentity != nil {
+			opts.DisableIdentity = *cloned.DisableIdentity
+		}
+	} else {
+		opts = &redis.Options{
+			Network:               cloned.Network,
+			Addr:                  cloned.Addr,
+			Username:              cloned.Username,
+			Password:              cloned.Password,
+			DB:                    cloned.DB,
+			ClientName:            cloned.ClientName,
+			Protocol:              cloned.Protocol,
+			Dialer:                cloned.Dialer,
+			OnConnect:             cloned.OnConnect,
+			MaxRetries:            cloned.MaxRetries,
+			MinRetryBackoff:       cloned.MinRetryBackoff,
+			MaxRetryBackoff:       cloned.MaxRetryBackoff,
+			DialTimeout:           cloned.DialTimeout,
+			ReadTimeout:           cloned.ReadTimeout,
+			WriteTimeout:          cloned.WriteTimeout,
+			ContextTimeoutEnabled: cloned.ContextTimeoutEnabled,
+			ReadBufferSize:        cloned.ReadBufferSize,
+			WriteBufferSize:       cloned.WriteBufferSize,
+			PoolFIFO:              cloned.PoolFIFO,
+			PoolSize:              cloned.PoolSize,
+			MinIdleConns:          cloned.MinIdleConns,
+			MaxIdleConns:          cloned.MaxIdleConns,
+			MaxActiveConns:        cloned.MaxActiveConns,
+			PoolTimeout:           cloned.PoolTimeout,
+			ConnMaxIdleTime:       cloned.ConnMaxIdleTime,
+			ConnMaxLifetime:       cloned.ConnMaxLifetime,
+			TLSConfig:             cloneTLSConfig(cloned.TLSConfig),
+			DisableIdentity:       boolValue(cloned.DisableIdentity, true),
+			IdentitySuffix:        cloned.IdentitySuffix,
+		}
+	}
+	opts.Network = strings.TrimSpace(opts.Network)
+	opts.Addr = strings.TrimSpace(opts.Addr)
+	opts.Username = strings.TrimSpace(opts.Username)
+	opts.ClientName = strings.TrimSpace(opts.ClientName)
+	opts.IdentitySuffix = strings.TrimSpace(opts.IdentitySuffix)
+
+	if opts.Addr == "" {
+		return nil, nil, ErrAddrRequired
+	}
+	if opts.Network == "" {
+		opts.Network = defaultRedisNetwork(opts.Addr)
+	}
+	if opts.DialTimeout == 0 {
+		opts.DialTimeout = defaultDialTimeout
+	}
+	if opts.ReadTimeout == 0 {
+		opts.ReadTimeout = defaultReadTimeout
+	}
+	if opts.WriteTimeout == 0 {
+		opts.WriteTimeout = defaultWriteTimeout
+	}
+	if cloned.Name == "" {
+		cloned.Name = opts.Addr
+	}
+	return &cloned, opts, nil
 }
 
-func (h *hook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
-	return func(ctx context.Context, cmd redis.Cmder) error {
-		start := time.Now()
-		err := next(ctx, cmd)
-		duration := time.Since(start).Seconds()
-
-		status := "success"
-		if err != nil && !errors.Is(err, redis.Nil) {
-			status = "error"
-		}
-
-		// Metrics
-		RedisRequestDuration.WithLabelValues(h.addr, cmd.Name(), status).Observe(duration)
-		RedisRequestsTotal.WithLabelValues(h.addr, cmd.Name(), status).Inc()
-
-		// Logging
-		if err != nil && !errors.Is(err, redis.Nil) {
-			h.error(ctx, "redis_command_failed",
-				"addr", h.addr,
-				"command", cmd.Name(),
-				"args", cmd.Args(),
-				"error", err,
-				"cost", duration,
-			)
-		} else {
-			h.info(ctx, "redis_access_log",
-				"addr", h.addr,
-				"command", cmd.Name(),
-				"status", status,
-				"cost", duration,
-			)
-		}
-
-		return err
+func buildTraceOptions(conf *Config) []redisotel.TracingOption {
+	opts := make([]redisotel.TracingOption, 0, 4)
+	if conf.TraceProvider != nil {
+		opts = append(opts, redisotel.WithTracerProvider(conf.TraceProvider))
 	}
-}
-
-func (h *hook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
-	return func(ctx context.Context, cmds []redis.Cmder) error {
-		start := time.Now()
-		err := next(ctx, cmds)
-		duration := time.Since(start).Seconds()
-
-		status := "success"
-		if err != nil && !errors.Is(err, redis.Nil) {
-			status = "error"
-		}
-
-		// Metrics
-		RedisRequestDuration.WithLabelValues(h.addr, "pipeline", status).Observe(duration)
-		RedisRequestsTotal.WithLabelValues(h.addr, "pipeline", status).Inc()
-
-		// Logging
-		if err != nil && !errors.Is(err, redis.Nil) {
-			h.error(ctx, "redis_pipeline_failed",
-				"addr", h.addr,
-				"count", len(cmds),
-				"error", err,
-				"cost", duration,
-			)
-		} else {
-			h.info(ctx, "redis_pipeline_access_log",
-				"addr", h.addr,
-				"count", len(cmds),
-				"status", status,
-				"cost", duration,
-			)
-		}
-
-		return err
+	opts = append(opts,
+		redisotel.WithCallerEnabled(conf.TraceCaller),
+		redisotel.WithDBStatement(conf.TraceIncludeCommandArgs),
+		redisotel.WithDialFilter(true),
+		redisotel.WithCommandFilter(isConnectionManagementCommand),
+		redisotel.WithCommandsFilter(isConnectionManagementPipeline),
+		redisotel.WithAttributes(attribute.String("micro.redis.name", conf.Name)),
+	)
+	if len(conf.TraceAttributes) > 0 {
+		opts = append(opts, redisotel.WithAttributes(conf.TraceAttributes...))
 	}
+	return opts
 }

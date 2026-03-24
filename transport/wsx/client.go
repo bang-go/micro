@@ -2,6 +2,8 @@ package wsx
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"math/rand"
 	"sync"
 	"time"
@@ -11,27 +13,34 @@ import (
 )
 
 type Client interface {
-	Connect(context.Context) error
+	Start(context.Context) error
 	Close()
 	OnConnect(func(context.Context, Connect))
 	OnMessage(func(context.Context, websocket.MessageType, []byte))
-	OnClose(func(context.Context, error))
+	OnDisconnect(func(context.Context, error))
 }
 
 type clientEntity struct {
 	addr    string
 	options *clientOptions
 
-	onConnect func(context.Context, Connect)
-	onMessage func(context.Context, websocket.MessageType, []byte)
-	onClose   func(context.Context, error)
+	hookMu       sync.RWMutex
+	onConnect    func(context.Context, Connect)
+	onMessage    func(context.Context, websocket.MessageType, []byte)
+	onDisconnect func(context.Context, error)
 
+	connMu sync.RWMutex
 	conn   Connect
-	closed chan struct{}
-	mu     sync.Mutex
 
-	// Add support for blocking connect
-	firstConnect chan error
+	stateMu          sync.Mutex
+	started          bool
+	firstConnect     chan error
+	firstConnectOnce sync.Once
+	runCtx           context.Context
+	runCancel        context.CancelFunc
+
+	closed    chan struct{}
+	closeOnce sync.Once
 }
 
 func NewClient(addr string, opts ...opt.Option[clientOptions]) Client {
@@ -50,33 +59,51 @@ func NewClient(addr string, opts ...opt.Option[clientOptions]) Client {
 	}
 }
 
-func (c *clientEntity) Connect(ctx context.Context) error {
-	go c.loop(ctx)
+func (c *clientEntity) Start(ctx context.Context) error {
+	ctx = normalizeContext(ctx)
 
-	// Wait for first connection result or context done
+	c.stateMu.Lock()
+	if c.isClosed() {
+		c.stateMu.Unlock()
+		return errClientClosed
+	}
+	if c.started {
+		c.stateMu.Unlock()
+		return errClientAlreadyStarted
+	}
+	c.started = true
+	c.runCtx, c.runCancel = context.WithCancel(context.Background())
+	runCtx := c.runCtx
+	c.stateMu.Unlock()
+
+	go c.loop(runCtx)
+
 	select {
 	case err := <-c.firstConnect:
 		return err
 	case <-ctx.Done():
+		c.Close()
 		return ctx.Err()
+	case <-c.closed:
+		return errClientClosed
 	}
 }
 
 func (c *clientEntity) loop(ctx context.Context) {
 	reconnectAttempts := 0
-	firstTry := true
 
 	for {
-		select {
-		case <-c.closed:
+		if c.shouldStop() {
+			c.signalFirstConnect(errClientClosed)
 			return
-		case <-ctx.Done():
-			return
-		default:
 		}
 
 		// Dial
-		dialCtx, cancel := context.WithTimeout(ctx, c.options.dialTimeout)
+		dialCtx := ctx
+		var cancel context.CancelFunc = func() {}
+		if c.options.dialTimeout > 0 {
+			dialCtx, cancel = context.WithTimeout(ctx, c.options.dialTimeout)
+		}
 		dialOpts := &websocket.DialOptions{
 			HTTPHeader: c.options.httpHeader,
 		}
@@ -84,32 +111,17 @@ func (c *clientEntity) loop(ctx context.Context) {
 		cancel()
 
 		if err != nil {
-			if firstTry {
-				c.firstConnect <- err
-				return
-			}
-
-			c.handleError(ctx, err)
+			c.handleDisconnect(ctx, err)
 			reconnectAttempts++
 			if c.options.maxReconnectAttempts >= 0 && reconnectAttempts > c.options.maxReconnectAttempts {
+				c.signalFirstConnect(fmt.Errorf("wsx: initial connect failed after %d attempts: %w", reconnectAttempts, err))
 				return
 			}
-
-			// Exponential backoff with jitter
-			delay := c.calculateBackoff(reconnectAttempts)
-			select {
-			case <-time.After(delay):
-				continue
-			case <-ctx.Done():
-				return
-			case <-c.closed:
+			if !c.waitReconnect(ctx, c.calculateBackoff(reconnectAttempts)) {
+				c.signalFirstConnect(errClientClosed)
 				return
 			}
-		}
-
-		if firstTry {
-			firstTry = false
-			c.firstConnect <- nil
+			continue
 		}
 
 		// Reset attempts on successful connection
@@ -117,30 +129,41 @@ func (c *clientEntity) loop(ctx context.Context) {
 
 		// Wrap connection
 		wsConn := NewConnect(conn, c.addr, c.options.connectOpts...)
-		c.mu.Lock()
-		c.conn = wsConn
-		c.mu.Unlock()
+		c.setConn(wsConn)
 
-		if c.onConnect != nil {
-			c.onConnect(ctx, wsConn)
+		c.signalFirstConnect(nil)
+		if err := c.handleConnect(ctx, wsConn); err != nil {
+			c.clearConn(wsConn)
+			_ = wsConn.Close()
+			c.handleDisconnect(ctx, err)
+			c.Close()
+			return
 		}
 
 		// Block reading
 		for {
 			mt, msg, err := wsConn.ReadMessage(ctx)
 			if err != nil {
-				c.handleError(ctx, err)
+				c.clearConn(wsConn)
 				wsConn.Close()
+				if c.shouldStop() || errors.Is(err, context.Canceled) {
+					return
+				}
+				c.handleDisconnect(ctx, err)
 				break
 			}
-			if c.onMessage != nil {
-				c.onMessage(ctx, mt, msg)
+			if err := c.handleMessage(ctx, mt, msg); err != nil {
+				c.clearConn(wsConn)
+				_ = wsConn.Close()
+				c.handleDisconnect(ctx, err)
+				c.Close()
+				return
 			}
 		}
 
-		// If connection drops, wait before next attempt
-		delay := c.calculateBackoff(0) // use base interval
-		time.Sleep(delay)
+		if !c.waitReconnect(ctx, c.calculateBackoff(0)) {
+			return
+		}
 	}
 }
 
@@ -162,32 +185,151 @@ func (c *clientEntity) calculateBackoff(attempt int) time.Duration {
 	return time.Duration(backoff + jitter)
 }
 
-func (c *clientEntity) handleError(ctx context.Context, err error) {
-	if c.onClose != nil {
-		c.onClose(ctx, err)
-	} else {
-		// Log error if needed
-		// fmt.Printf("wsx client error: %v\n", err)
-	}
-}
-
 func (c *clientEntity) Close() {
-	close(c.closed)
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.conn != nil {
-		c.conn.Close()
-	}
+	c.closeOnce.Do(func() {
+		c.signalFirstConnect(errClientClosed)
+		close(c.closed)
+
+		c.stateMu.Lock()
+		cancel := c.runCancel
+		c.stateMu.Unlock()
+		if cancel != nil {
+			cancel()
+		}
+
+		if conn := c.currentConn(); conn != nil {
+			_ = conn.Close()
+		}
+	})
 }
 
 func (c *clientEntity) OnConnect(f func(context.Context, Connect)) {
+	c.hookMu.Lock()
+	defer c.hookMu.Unlock()
 	c.onConnect = f
 }
 
 func (c *clientEntity) OnMessage(f func(context.Context, websocket.MessageType, []byte)) {
+	c.hookMu.Lock()
+	defer c.hookMu.Unlock()
 	c.onMessage = f
 }
 
-func (c *clientEntity) OnClose(f func(context.Context, error)) {
-	c.onClose = f
+func (c *clientEntity) OnDisconnect(f func(context.Context, error)) {
+	c.hookMu.Lock()
+	defer c.hookMu.Unlock()
+	c.onDisconnect = f
+}
+
+func (c *clientEntity) waitReconnect(ctx context.Context, delay time.Duration) bool {
+	if delay <= 0 {
+		return !c.shouldStop()
+	}
+
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+
+	select {
+	case <-timer.C:
+		return !c.shouldStop()
+	case <-ctx.Done():
+		return false
+	case <-c.closed:
+		return false
+	}
+}
+
+func (c *clientEntity) signalFirstConnect(err error) {
+	c.firstConnectOnce.Do(func() {
+		c.firstConnect <- err
+	})
+}
+
+func (c *clientEntity) setConn(conn Connect) {
+	c.connMu.Lock()
+	defer c.connMu.Unlock()
+	c.conn = conn
+}
+
+func (c *clientEntity) clearConn(conn Connect) {
+	c.connMu.Lock()
+	defer c.connMu.Unlock()
+	if c.conn == conn {
+		c.conn = nil
+	}
+}
+
+func (c *clientEntity) currentConn() Connect {
+	c.connMu.RLock()
+	defer c.connMu.RUnlock()
+	return c.conn
+}
+
+func (c *clientEntity) handleConnect(ctx context.Context, conn Connect) error {
+	c.hookMu.RLock()
+	hook := c.onConnect
+	c.hookMu.RUnlock()
+	if hook != nil {
+		return invokeClientHookSafely("on_connect", func() {
+			hook(ctx, conn)
+		})
+	}
+	return nil
+}
+
+func (c *clientEntity) handleMessage(ctx context.Context, typ websocket.MessageType, msg []byte) error {
+	c.hookMu.RLock()
+	hook := c.onMessage
+	c.hookMu.RUnlock()
+	if hook != nil {
+		return invokeClientHookSafely("on_message", func() {
+			hook(ctx, typ, msg)
+		})
+	}
+	return nil
+}
+
+func (c *clientEntity) handleDisconnect(ctx context.Context, err error) {
+	if err == nil || c.shouldStop() {
+		return
+	}
+
+	c.hookMu.RLock()
+	hook := c.onDisconnect
+	c.hookMu.RUnlock()
+	if hook != nil {
+		_ = invokeClientHookSafely("on_disconnect", func() {
+			hook(ctx, err)
+		})
+	}
+}
+
+func invokeClientHookSafely(name string, fn func()) (err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("wsx: client %s callback panic: %v", name, recovered)
+		}
+	}()
+	fn()
+	return nil
+}
+
+func (c *clientEntity) shouldStop() bool {
+	if c.isClosed() {
+		return true
+	}
+
+	c.stateMu.Lock()
+	runCtx := c.runCtx
+	c.stateMu.Unlock()
+	return runCtx != nil && runCtx.Err() != nil
+}
+
+func (c *clientEntity) isClosed() bool {
+	select {
+	case <-c.closed:
+		return true
+	default:
+		return false
+	}
 }

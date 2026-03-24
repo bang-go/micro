@@ -2,9 +2,7 @@ package rmq
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"sort"
 	"strings"
 	"time"
 
@@ -12,223 +10,291 @@ import (
 	"github.com/apache/rocketmq-clients/golang/v5/credentials"
 	v2 "github.com/apache/rocketmq-clients/golang/v5/protocol/v2"
 	"github.com/bang-go/micro/telemetry/logger"
-	"github.com/bang-go/util"
 	"github.com/prometheus/client_golang/prometheus"
 )
-
-// Metrics
-var (
-	ConsumerMessagesTotal = prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Name: "rmq_consumer_messages_total",
-			Help: "Total number of messages received by consumer",
-		},
-		[]string{"topic", "group", "status"},
-	)
-)
-
-func init() {
-	prometheus.MustRegister(ConsumerMessagesTotal)
-}
-
-const (
-	DefaultConsumerAwaitDuration           = time.Second * 5
-	DefaultConsumerMaxMessageNum     int32 = 16
-	DefaultConsumerInvisibleDuration       = time.Second * 20
-	ConsumerMaxMessageNum            int32 = 32 //rocketmq sdk限制最大只能是32
-	// DefaultConsumerStartTimeout 默认的 Consumer Start() 超时时间
-	DefaultConsumerStartTimeout = time.Second * 10
-)
-
-type SimpleConsumer = rmqClient.SimpleConsumer
-type MessageView = rmqClient.MessageView
-type FilterExpression = rmqClient.FilterExpression
-type MessageViewFunc func(*MessageView) bool
-type ErrRpcStatus = rmqClient.ErrRpcStatus
-
-var AsErrRpcStatus = rmqClient.AsErrRpcStatus
-var NewFilterExpression = rmqClient.NewFilterExpression
-var NewFilterExpressionWithType = rmqClient.NewFilterExpressionWithType
-var SubAll = rmqClient.SUB_ALL
 
 const (
 	CodeMessageNotFound = v2.Code_MESSAGE_NOT_FOUND
 )
 
-type Consumer interface {
+type consumerAPI interface {
 	Start() error
-	Receive() ([]*MessageView, error)
-	ReceiveWithContext(ctx context.Context) ([]*MessageView, error)
-	GetSimpleConsumer() SimpleConsumer
-	Ack(ctx context.Context, messageView *MessageView) error
+	Receive(context.Context, int32, time.Duration) ([]*MessageView, error)
+	Ack(context.Context, *MessageView) error
+	GracefulStop() error
+}
+
+type consumerFactory func(*rmqClient.Config, ...rmqClient.SimpleConsumerOption) (consumerAPI, error)
+
+type ConsumerConfig struct {
+	Name                    string
+	Topic                   string
+	Group                   string
+	Endpoint                string
+	Namespace               string
+	AccessKey               string
+	SecretKey               string
+	SubscriptionExpressions map[string]*FilterExpression
+	AwaitDuration           time.Duration
+	MaxMessageNum           int32
+	InvisibleDuration       time.Duration
+	StartTimeout            time.Duration
+
+	Logger            *logger.Logger
+	EnableLogger      bool
+	DisableMetrics    bool
+	MetricsRegisterer prometheus.Registerer
+
+	newConsumer consumerFactory
+}
+
+type Consumer interface {
+	Start(context.Context) error
+	Receive(context.Context) ([]*MessageView, error)
+	Ack(context.Context, *MessageView) error
 	Close() error
 }
 
 type consumerEntity struct {
-	simpleConsumer SimpleConsumer
-	*ConsumerConfig
-}
-type ConsumerConfig struct {
-	Topic                   string
-	Group                   string
-	Endpoint                string
-	AccessKey               string
-	SecretKey               string
-	SubscriptionExpressions map[string]*FilterExpression
-	AwaitDuration           time.Duration // maximum waiting time for receive func
-	MaxMessageNum           int32         // maximum number of messages received at one time
-	InvisibleDuration       time.Duration // invisibleDuration should > 20s
-	// StartTimeout Start() 方法的超时时间
-	StartTimeout time.Duration
-
-	Logger       *logger.Logger
-	EnableLogger bool
+	name              string
+	group             string
+	subscriptionLabel string
+	maxMessages       int32
+	invisibleDuration time.Duration
+	startTimeout      time.Duration
+	logger            *logger.Logger
+	enableLogger      bool
+	metrics           *metrics
+	consumer          consumerAPI
 }
 
-// NewSimpleConsumer creates a new simple consumer
 func NewSimpleConsumer(conf *ConsumerConfig) (Consumer, error) {
-	if conf == nil {
-		return nil, errors.New("rmq: consumer config is required")
-	}
-	if conf.Group == "" {
-		return nil, errors.New("rmq: consumer group is required")
-	}
-	if conf.Endpoint == "" {
-		return nil, errors.New("rmq: endpoint is required")
-	}
-	if conf.Logger == nil {
-		conf.Logger = logger.New(logger.WithLevel("info"))
-	}
-
-	consumer := &consumerEntity{ConsumerConfig: conf}
-
-	await := util.If(conf.AwaitDuration > 0, conf.AwaitDuration, DefaultConsumerAwaitDuration)
-
-	var subscriptionExpressions map[string]*FilterExpression
-	if len(conf.SubscriptionExpressions) > 0 {
-		// 优先使用配置的订阅表达式
-		subscriptionExpressions = conf.SubscriptionExpressions
-	} else if conf.Topic != "" {
-		// 使用 Topic 创建订阅表达式
-		subscriptionExpressions = map[string]*FilterExpression{conf.Topic: SubAll}
-	} else {
-		return nil, errors.New("rmq: topic or subscription expressions are required")
-	}
-
-	var err error
-	consumer.simpleConsumer, err = rmqClient.NewSimpleConsumer(&rmqClient.Config{
-		Endpoint:      conf.Endpoint,
-		ConsumerGroup: conf.Group,
-		Credentials: &credentials.SessionCredentials{
-			AccessKey:    conf.AccessKey,
-			AccessSecret: conf.SecretKey,
-		},
-	},
-		rmqClient.WithAwaitDuration(await),
-		rmqClient.WithSubscriptionExpressions(subscriptionExpressions),
-	)
+	config, sdkConfig, options, err := prepareConsumerConfig(conf)
 	if err != nil {
 		return nil, err
 	}
-	return consumer, nil
-}
 
-// Start starts the consumer
-func (c *consumerEntity) Start() error {
-	// 确定超时时间：如果未设置或为 0，使用默认值
-	timeout := c.StartTimeout
-	if timeout <= 0 {
-		timeout = DefaultConsumerStartTimeout
+	factory := config.newConsumer
+	if factory == nil {
+		factory = func(cfg *rmqClient.Config, opts ...rmqClient.SimpleConsumerOption) (consumerAPI, error) {
+			return rmqClient.NewSimpleConsumer(cfg, opts...)
+		}
 	}
 
-	// 应用层超时控制：使用 goroutine + channel 实现
+	var metrics *metrics
+	if !config.DisableMetrics {
+		metrics = defaultRMQMetrics()
+		if config.MetricsRegisterer != nil {
+			metrics = newRMQMetrics(config.MetricsRegisterer)
+		}
+	}
+
+	consumer, err := factory(sdkConfig, options...)
+	if err != nil {
+		return nil, fmt.Errorf("rmq: create consumer failed: %w", err)
+	}
+
+	return &consumerEntity{
+		name:              config.Name,
+		group:             config.Group,
+		subscriptionLabel: subscriptionsName(config.SubscriptionExpressions),
+		maxMessages:       boundedMaxMessages(config.MaxMessageNum),
+		invisibleDuration: invisibleDurationOrDefault(config.InvisibleDuration),
+		startTimeout:      config.StartTimeout,
+		logger:            config.Logger,
+		enableLogger:      config.EnableLogger,
+		metrics:           metrics,
+		consumer:          consumer,
+	}, nil
+}
+
+func (c *consumerEntity) Start(ctx context.Context) error {
+	if ctx == nil {
+		return ErrContextRequired
+	}
+
+	startCtx, cancel := timeoutContext(ctx, c.startTimeout)
+	defer cancel()
+
 	done := make(chan error, 1)
 	go func() {
-		done <- c.simpleConsumer.Start()
+		done <- c.consumer.Start()
 	}()
 
 	select {
 	case err := <-done:
-		if err == nil && c.EnableLogger {
-			topic := c.Topic
-			if topic == "" && len(c.SubscriptionExpressions) > 0 {
-				topics := make([]string, 0, len(c.SubscriptionExpressions))
-				for t := range c.SubscriptionExpressions {
-					topics = append(topics, t)
-				}
-				sort.Strings(topics)
-				topic = strings.Join(topics, ",")
-			}
-			c.Logger.Info(context.Background(), "rmq_consumer_started", "group", c.Group, "topic", topic)
+		if err != nil {
+			return fmt.Errorf("rmq: start consumer failed: %w", err)
 		}
-		return err
-	case <-time.After(timeout):
-		// 注意：超时后，SDK 内部的连接操作可能仍在进行
-		return fmt.Errorf("rmq: start consumer timeout (%v)", timeout)
+		if c.enableLogger {
+			c.logger.Info(ctx, "rmq consumer started", "name", c.name, "group", c.group, "subscriptions", c.subscriptionLabel)
+		}
+		return nil
+	case <-startCtx.Done():
+		return fmt.Errorf("rmq: start consumer failed: %w", startCtx.Err())
 	}
 }
 
-// Receive 接收消息
-func (c *consumerEntity) Receive() ([]*MessageView, error) {
-	return c.ReceiveWithContext(context.Background())
+func (c *consumerEntity) Receive(ctx context.Context) ([]*MessageView, error) {
+	if ctx == nil {
+		return nil, ErrContextRequired
+	}
+
+	startedAt := time.Now()
+	messages, err := c.consumer.Receive(ctx, c.maxMessages, c.invisibleDuration)
+	status := receiveStatus(err)
+	duration := time.Since(startedAt)
+
+	if c.metrics != nil {
+		c.metrics.consumerRequestsTotal.WithLabelValues(c.name, "receive", status).Inc()
+		c.metrics.consumerDuration.WithLabelValues(c.name, "receive", status).Observe(duration.Seconds())
+		c.metrics.consumerMessagesTotal.WithLabelValues(c.name, status).Add(float64(len(messages)))
+	}
+
+	if c.enableLogger {
+		fields := []any{
+			"name", c.name,
+			"group", c.group,
+			"subscriptions", c.subscriptionLabel,
+			"message_count", len(messages),
+			"status", status,
+			"duration", duration,
+		}
+		switch status {
+		case "error":
+			c.logger.Error(ctx, "rmq consumer receive failed", append(fields, "error", err)...)
+		case "empty":
+			c.logger.Debug(ctx, "rmq consumer receive empty", fields...)
+		default:
+			c.logger.Debug(ctx, "rmq consumer receive completed", fields...)
+		}
+	}
+
+	return messages, err
 }
 
-// ReceiveWithContext 接收消息（支持 context 控制）
-func (c *consumerEntity) ReceiveWithContext(ctx context.Context) ([]*MessageView, error) {
-	maxMessageNum := util.If(c.MaxMessageNum > 0, c.MaxMessageNum, DefaultConsumerMaxMessageNum)
-	invisibleDuration := util.If(c.InvisibleDuration > 0, c.InvisibleDuration, DefaultConsumerInvisibleDuration)
+func (c *consumerEntity) Ack(ctx context.Context, messageView *MessageView) error {
+	if ctx == nil {
+		return ErrContextRequired
+	}
+	if messageView == nil {
+		return ErrMessageViewNil
+	}
 
-	start := time.Now()
-	msgs, err := c.simpleConsumer.Receive(ctx, maxMessageNum, invisibleDuration)
-	duration := time.Since(start).Seconds()
-
+	startedAt := time.Now()
+	err := c.consumer.Ack(ctx, messageView)
 	status := "success"
 	if err != nil {
 		status = "error"
-		// Ignore code: message not found (it's normal when polling)
-		if asErr, ok := AsErrRpcStatus(err); ok && asErr.Code == int32(CodeMessageNotFound) {
-			status = "empty"
-		} else if c.EnableLogger {
-			c.Logger.Error(ctx, "rmq_consumer_receive_failed",
-				"group", c.Group,
-				"error", err,
-				"cost", duration,
-			)
+	}
+	duration := time.Since(startedAt)
+
+	if c.metrics != nil {
+		c.metrics.consumerRequestsTotal.WithLabelValues(c.name, "ack", status).Inc()
+		c.metrics.consumerDuration.WithLabelValues(c.name, "ack", status).Observe(duration.Seconds())
+	}
+
+	if c.enableLogger {
+		fields := []any{
+			"name", c.name,
+			"group", c.group,
+			"message_id", messageView.GetMessageId(),
+			"status", status,
+			"duration", duration,
 		}
-	} else if c.EnableLogger && len(msgs) > 0 {
-		// Optional: log received messages summary
-		c.Logger.Info(ctx, "rmq_consumer_receive_success",
-			"group", c.Group,
-			"count", len(msgs),
-			"cost", duration,
-		)
+		if err != nil {
+			c.logger.Error(ctx, "rmq consumer ack failed", append(fields, "error", err)...)
+		} else {
+			c.logger.Debug(ctx, "rmq consumer ack completed", fields...)
+		}
 	}
 
-	// Metrics
-	ConsumerMessagesTotal.WithLabelValues(c.Topic, c.Group, status).Add(float64(len(msgs)))
-
-	return msgs, err
-}
-
-// GetSimpleConsumer 获取底层的 SimpleConsumer 实例
-func (c *consumerEntity) GetSimpleConsumer() SimpleConsumer {
-	return c.simpleConsumer
-}
-
-// Ack 确认消息已处理
-func (c *consumerEntity) Ack(ctx context.Context, messageView *MessageView) error {
-	err := c.simpleConsumer.Ack(ctx, messageView)
-	if err != nil && c.EnableLogger {
-		c.Logger.Error(ctx, "rmq_consumer_ack_failed",
-			"group", c.Group,
-			"msg_id", messageView.GetMessageId(),
-			"error", err,
-		)
-	}
 	return err
 }
 
-// Close 关闭消费者并释放资源
 func (c *consumerEntity) Close() error {
-	return c.simpleConsumer.GracefulStop()
+	return c.consumer.GracefulStop()
+}
+
+func prepareConsumerConfig(conf *ConsumerConfig) (*ConsumerConfig, *rmqClient.Config, []rmqClient.SimpleConsumerOption, error) {
+	if conf == nil {
+		return nil, nil, nil, ErrNilConsumerConfig
+	}
+
+	cloned := *conf
+	cloned.Name = strings.TrimSpace(cloned.Name)
+	cloned.Topic = strings.TrimSpace(cloned.Topic)
+	cloned.Group = strings.TrimSpace(cloned.Group)
+	cloned.Endpoint = strings.TrimSpace(cloned.Endpoint)
+	cloned.Namespace = strings.TrimSpace(cloned.Namespace)
+	cloned.AccessKey = strings.TrimSpace(cloned.AccessKey)
+	cloned.SecretKey = strings.TrimSpace(cloned.SecretKey)
+	cloned.Logger = defaultLogger(cloned.Logger)
+	if cloned.Group == "" {
+		return nil, nil, nil, ErrConsumerGroupEmpty
+	}
+	if cloned.Endpoint == "" {
+		return nil, nil, nil, ErrEndpointRequired
+	}
+	if cloned.StartTimeout <= 0 {
+		cloned.StartTimeout = defaultStartTimeout
+	}
+	if cloned.AwaitDuration <= 0 {
+		cloned.AwaitDuration = defaultReceiveAwaitDuration
+	}
+	if cloned.Name == "" {
+		cloned.Name = cloned.Group
+	}
+
+	subscriptions, err := cloneSubscriptions(cloned.SubscriptionExpressions)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if len(subscriptions) == 0 {
+		if cloned.Topic == "" {
+			return nil, nil, nil, ErrSubscriptionMiss
+		}
+		subscriptions = map[string]*FilterExpression{cloned.Topic: SubAll}
+	}
+	cloned.SubscriptionExpressions = subscriptions
+
+	sdkConfig := &rmqClient.Config{
+		Endpoint:      cloned.Endpoint,
+		NameSpace:     cloned.Namespace,
+		ConsumerGroup: cloned.Group,
+		Credentials:   &credentials.SessionCredentials{AccessKey: cloned.AccessKey, AccessSecret: cloned.SecretKey},
+	}
+
+	options := []rmqClient.SimpleConsumerOption{
+		rmqClient.WithAwaitDuration(cloned.AwaitDuration),
+		rmqClient.WithSubscriptionExpressions(subscriptions),
+	}
+	return &cloned, sdkConfig, options, nil
+}
+
+func boundedMaxMessages(value int32) int32 {
+	if value <= 0 {
+		return defaultReceiveMaxMessages
+	}
+	if value > maxReceiveMessages {
+		return maxReceiveMessages
+	}
+	return value
+}
+
+func invisibleDurationOrDefault(value time.Duration) time.Duration {
+	if value <= 0 {
+		return defaultInvisibleDuration
+	}
+	return value
+}
+
+func receiveStatus(err error) string {
+	if err == nil {
+		return "success"
+	}
+	if rpcErr, ok := AsErrRpcStatus(err); ok && rpcErr.Code == int32(CodeMessageNotFound) {
+		return "empty"
+	}
+	return "error"
 }

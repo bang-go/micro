@@ -1,140 +1,239 @@
-package elasticsearchx_test
+package elasticsearchx
 
 import (
 	"context"
-	"encoding/json"
-	"log"
+	"io"
+	"net/http"
+	"strings"
 	"testing"
-	"time"
 
-	"github.com/bang-go/micro/store/elasticsearchx"
 	"github.com/elastic/go-elasticsearch/v9/typedapi/core/search"
 	"github.com/elastic/go-elasticsearch/v9/typedapi/types"
 )
 
-func TestClient(t *testing.T) {
-	// 创建客户端
-	client, err := elasticsearchx.New(&elasticsearchx.Config{
-		Addresses: []string{""},
-		Username:  "",
-		Password:  "",
+func TestPrepareConfig(t *testing.T) {
+	t.Run("validate config", func(t *testing.T) {
+		_, err := prepareConfig(nil)
+		if err != ErrNilConfig {
+			t.Fatalf("expected ErrNilConfig, got %v", err)
+		}
+
+		_, err = prepareConfig(&Config{})
+		if err != ErrAddressRequired {
+			t.Fatalf("expected ErrAddressRequired, got %v", err)
+		}
 	})
-	if err != nil {
-		log.Fatal(err)
-	}
 
-	ctx := context.Background()
-	index := "test_index"
+	t.Run("clone and default headers", func(t *testing.T) {
+		header := http.Header{
+			"X-Test": []string{"value"},
+		}
+		cfg, err := prepareConfig(&Config{
+			Addresses: []string{" http://localhost:9200 ", "http://localhost:9200", " "},
+			Header:    header,
+		})
+		if err != nil {
+			t.Fatalf("prepareConfig() error = %v", err)
+		}
+		if len(cfg.Addresses) != 1 || cfg.Addresses[0] != "http://localhost:9200" {
+			t.Fatalf("unexpected addresses: %#v", cfg.Addresses)
+		}
+		if cfg.Header.Get("Accept") != "application/json" || cfg.Header.Get("Content-Type") != "application/json" {
+			t.Fatalf("expected default headers, got %#v", cfg.Header)
+		}
+		header.Set("X-Test", "mutated")
+		if got, want := cfg.Header.Get("X-Test"), "value"; got != want {
+			t.Fatalf("Header[X-Test] = %q, want %q", got, want)
+		}
+	})
+}
 
-	// 清理：删除索引（如果存在）
-	_, _ = client.DeleteIndex(index)
-
-	// 1. 创建索引
-	mapping := map[string]interface{}{
-		"mappings": map[string]interface{}{
-			"properties": map[string]interface{}{
-				"name": map[string]interface{}{
-					"type": "text",
-				},
-				"age": map[string]interface{}{
-					"type": "integer",
-				},
-			},
+func TestIndexLifecycleRequests(t *testing.T) {
+	transport := &recordingTransport{
+		handler: func(req *http.Request, body string) (*http.Response, error) {
+			switch {
+			case req.Method == http.MethodPut && req.URL.Path == "/products":
+				if !strings.Contains(body, `"mappings"`) {
+					t.Fatalf("expected create index body, got %s", body)
+				}
+				return jsonResponse(`{"acknowledged":true,"shards_acknowledged":true,"index":"products"}`), nil
+			case req.Method == http.MethodHead && req.URL.Path == "/products":
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header: http.Header{
+						"X-Elastic-Product": []string{"Elasticsearch"},
+					},
+					Body: io.NopCloser(strings.NewReader("")),
+				}, nil
+			case req.Method == http.MethodDelete && req.URL.Path == "/products":
+				return jsonResponse(`{"acknowledged":true}`), nil
+			default:
+				t.Fatalf("unexpected request: %s %s body=%s", req.Method, req.URL.Path, body)
+				return nil, nil
+			}
 		},
 	}
-	createResp, err := client.CreateIndex(index, mapping)
+
+	client, err := New(&Config{
+		Addresses: []string{"http://example.com"},
+		Transport: transport,
+	})
 	if err != nil {
-		log.Fatal(err)
+		t.Fatalf("New() error = %v", err)
 	}
-	log.Printf("索引创建成功: acknowledged=%v, index=%s", createResp.Acknowledged, createResp.Index)
 
-	// 等待索引就绪
-	time.Sleep(1 * time.Second)
-
-	// 2. 索引文档
-	document := map[string]interface{}{
-		"name": "go-elasticsearch",
-		"age":  1,
+	if _, err := client.CreateIndex(context.Background(), "products", map[string]any{
+		"mappings": map[string]any{
+			"properties": map[string]any{
+				"name": map[string]any{"type": "keyword"},
+			},
+		},
+	}); err != nil {
+		t.Fatalf("CreateIndex() error = %v", err)
 	}
-	indexResp, err := client.Index(index, "1", document)
+
+	exists, err := client.ExistsIndex(context.Background(), "products")
 	if err != nil {
-		log.Fatal(err)
+		t.Fatalf("ExistsIndex() error = %v", err)
 	}
-	log.Printf("文档索引成功: id=%s, result=%s", indexResp.Id_, indexResp.Result)
+	if !exists {
+		t.Fatal("expected index to exist")
+	}
 
-	// 等待索引刷新
-	time.Sleep(1 * time.Second)
+	if _, err := client.DeleteIndex(context.Background(), "products"); err != nil {
+		t.Fatalf("DeleteIndex() error = %v", err)
+	}
+}
 
-	// 3. 获取文档
-	doc, err := client.Get(index, "1")
+func TestDocumentSearchAndBulkRequests(t *testing.T) {
+	transport := &recordingTransport{
+		handler: func(req *http.Request, body string) (*http.Response, error) {
+			switch {
+			case req.Method == http.MethodPut && req.URL.Path == "/products/_doc/1":
+				if !strings.Contains(body, `"name":"keyboard"`) {
+					t.Fatalf("expected index body, got %s", body)
+				}
+				return jsonResponse(`{"_index":"products","_id":"1","result":"created","_version":1}`), nil
+			case req.Method == http.MethodPost && req.URL.Path == "/products/_update/1":
+				if !strings.Contains(body, `"doc":{"stock":10}`) {
+					t.Fatalf("expected update body, got %s", body)
+				}
+				return jsonResponse(`{"_index":"products","_id":"1","result":"updated","_version":2}`), nil
+			case req.Method == http.MethodPost && req.URL.Path == "/products/_search":
+				if !strings.Contains(body, `"match_all"`) {
+					t.Fatalf("expected search body, got %s", body)
+				}
+				return jsonResponse(`{"took":1,"timed_out":false,"hits":{"total":{"value":1,"relation":"eq"},"hits":[]}}`), nil
+			case req.Method == http.MethodPost && req.URL.Path == "/_bulk":
+				if !strings.Contains(body, `"index":{"_id":"2","_index":"products"}`) || !strings.Contains(body, `"delete":{"_id":"3","_index":"products"}`) {
+					t.Fatalf("unexpected bulk body: %s", body)
+				}
+				return jsonResponse(`{"errors":false,"took":1,"items":[]}`), nil
+			default:
+				t.Fatalf("unexpected request: %s %s body=%s", req.Method, req.URL.Path, body)
+				return nil, nil
+			}
+		},
+	}
+
+	client, err := New(&Config{
+		Addresses: []string{"http://example.com"},
+		Transport: transport,
+	})
 	if err != nil {
-		log.Fatal(err)
-	}
-	log.Printf("获取文档成功: found=%v, id=%s, index=%s", doc.Found, doc.Id_, doc.Index_)
-	if doc.Source_ != nil {
-		var source map[string]interface{}
-		if err := json.Unmarshal(doc.Source_, &source); err == nil {
-			log.Printf("文档内容: %v", source)
-		}
+		t.Fatalf("New() error = %v", err)
 	}
 
-	// 4. 更新文档
-	updateDoc := map[string]interface{}{
-		"age": 2,
+	if _, err := client.Index(context.Background(), "products", "1", map[string]any{"name": "keyboard"}); err != nil {
+		t.Fatalf("Index() error = %v", err)
 	}
-	updateResp, err := client.Update(index, "1", updateDoc)
-	if err != nil {
-		log.Fatal(err)
+	if _, err := client.Update(context.Background(), "products", "1", map[string]any{"stock": 10}); err != nil {
+		t.Fatalf("Update() error = %v", err)
 	}
-	log.Printf("文档更新成功: id=%s, result=%s", updateResp.Id_, updateResp.Result)
-
-	// 5. 搜索文档（类型化 API）
-	typedRequest := &search.Request{
+	if _, err := client.Search(context.Background(), "products", &search.Request{
 		Query: &types.Query{
 			MatchAll: &types.MatchAllQuery{},
 		},
+	}); err != nil {
+		t.Fatalf("Search() error = %v", err)
 	}
-	typedResult, err := client.Search(ctx, index, typedRequest)
-	if err != nil {
-		log.Fatal(err)
+	if _, err := client.Bulk(context.Background(), []BulkOperation{
+		{Action: "index", Index: "products", ID: "2", Document: map[string]any{"name": "mouse"}},
+		{Action: "delete", Index: "products", ID: "3"},
+	}); err != nil {
+		t.Fatalf("Bulk() error = %v", err)
 	}
-	log.Printf("搜索结果（类型化）: hits=%d", typedResult.Hits.Total.Value)
+}
 
-	// 7. 批量操作
-	operations := []elasticsearchx.BulkOperation{
-		{
-			Action:   "index",
-			Index:    index,
-			ID:       "2",
-			Document: map[string]interface{}{"name": "bulk-test", "age": 10},
+func TestValidation(t *testing.T) {
+	client, err := New(&Config{Addresses: []string{"http://example.com"}, Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return jsonResponse(`{}`), nil
+	})})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if _, err := client.CreateIndex(nil, "products", nil); err != ErrContextRequired {
+		t.Fatalf("expected ErrContextRequired, got %v", err)
+	}
+	if _, err := client.CreateIndex(context.Background(), " ", nil); err != ErrIndexRequired {
+		t.Fatalf("expected ErrIndexRequired, got %v", err)
+	}
+	if _, err := client.Index(nil, "products", "", map[string]any{"name": "keyboard"}); err != ErrContextRequired {
+		t.Fatalf("expected ErrContextRequired, got %v", err)
+	}
+	if _, err := client.Index(context.Background(), "products", "", nil); err != ErrDocumentRequired {
+		t.Fatalf("expected ErrDocumentRequired, got %v", err)
+	}
+	if _, err := client.Get(nil, "products", "1"); err != ErrContextRequired {
+		t.Fatalf("expected ErrContextRequired, got %v", err)
+	}
+	if _, err := client.Get(context.Background(), "products", " "); err != ErrIDRequired {
+		t.Fatalf("expected ErrIDRequired, got %v", err)
+	}
+	if _, err := client.Search(nil, "products", &search.Request{}); err != ErrContextRequired {
+		t.Fatalf("expected ErrContextRequired, got %v", err)
+	}
+	if _, err := client.Search(context.Background(), "products", nil); err != ErrSearchRequestRequired {
+		t.Fatalf("expected ErrSearchRequestRequired, got %v", err)
+	}
+	if _, err := client.Bulk(nil, []BulkOperation{{Action: "delete", Index: "products", ID: "1"}}); err != ErrContextRequired {
+		t.Fatalf("expected ErrContextRequired, got %v", err)
+	}
+	if _, err := client.Bulk(context.Background(), nil); err != ErrBulkOperationsRequired {
+		t.Fatalf("expected ErrBulkOperationsRequired, got %v", err)
+	}
+}
+
+type recordingTransport struct {
+	handler func(*http.Request, string) (*http.Response, error)
+}
+
+func (t *recordingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	var body []byte
+	if req.Body != nil {
+		read, err := io.ReadAll(req.Body)
+		if err != nil {
+			return nil, err
+		}
+		body = read
+	}
+	return t.handler(req, string(body))
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func jsonResponse(body string) *http.Response {
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header: http.Header{
+			"Content-Type":      []string{"application/json"},
+			"X-Elastic-Product": []string{"Elasticsearch"},
 		},
-		{
-			Action:   "index",
-			Index:    index,
-			ID:       "3",
-			Document: map[string]interface{}{"name": "bulk-test-2", "age": 20},
-		},
+		Body: io.NopCloser(strings.NewReader(body)),
 	}
-	bulkResp, err := client.Bulk(operations)
-	if err != nil {
-		log.Fatal(err)
-	}
-	log.Printf("批量操作成功: errors=%v, took=%dms", bulkResp.Errors, bulkResp.Took)
-
-	// 等待索引刷新
-	time.Sleep(1 * time.Second)
-
-	// 8. 删除文档
-	deleteResp, err := client.Delete(index, "1")
-	if err != nil {
-		log.Fatal(err)
-	}
-	log.Printf("文档删除成功: id=%s, result=%s", deleteResp.Id_, deleteResp.Result)
-
-	// 9. 删除索引
-	deleteIndexResp, err := client.DeleteIndex(index)
-	if err != nil {
-		log.Fatal(err)
-	}
-	log.Printf("索引删除成功: acknowledged=%v", deleteIndexResp.Acknowledged)
 }

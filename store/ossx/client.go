@@ -2,14 +2,38 @@ package ossx
 
 import (
 	"context"
-	"fmt"
+	"errors"
+	"net/http"
+	"strings"
 
 	aliyunoss "github.com/aliyun/alibabacloud-oss-go-sdk-v2/oss"
 	"github.com/aliyun/alibabacloud-oss-go-sdk-v2/oss/credentials"
 )
 
-// Config 类型别名定义，简化导入
-type Config = aliyunoss.Config
+var (
+	ErrNilConfig           = errors.New("ossx: config is required")
+	ErrContextRequired     = errors.New("ossx: context is required")
+	ErrEndpointRequired    = errors.New("ossx: endpoint is required")
+	ErrRegionRequired      = errors.New("ossx: region is required")
+	ErrCredentialsRequired = errors.New("ossx: credentials provider or access keys are required")
+	ErrRequestRequired     = errors.New("ossx: request is required")
+	ErrFilePathRequired    = errors.New("ossx: file path is required")
+	ErrBucketRequired      = errors.New("ossx: bucket is required")
+	ErrKeyRequired         = errors.New("ossx: object key is required")
+)
+
+type Config struct {
+	Endpoint            string
+	Region              string
+	AccessKeyID         string
+	AccessKeySecret     string
+	CredentialsProvider credentials.CredentialsProvider
+	HTTPClient          *http.Client
+	Base                *aliyunoss.Config
+
+	newClient func(*aliyunoss.Config, ...func(*Options)) ossAPI
+}
+
 type Options = aliyunoss.Options
 type AppendOptions = aliyunoss.AppendOptions
 type PutObjectRequest = aliyunoss.PutObjectRequest
@@ -18,59 +42,159 @@ type AppendObjectRequest = aliyunoss.AppendObjectRequest
 type AppendObjectResult = aliyunoss.AppendObjectResult
 type AppendOnlyFile = aliyunoss.AppendOnlyFile
 
-// Client 定义了OSS客户端的接口
 type Client interface {
-	// PutObject 上传对象到OSS
+	Raw() *aliyunoss.Client
 	PutObject(context.Context, *PutObjectRequest, ...func(*Options)) (*PutObjectResult, error)
-	// PutObjectFromFile 从本地文件上传对象到OSS
-	PutObjectFromFile(context.Context, string, *PutObjectRequest, ...func(*Options)) (*PutObjectResult, error)
-	// AppendObject 追加对象到OSS
+	PutObjectFromFile(context.Context, *PutObjectRequest, string, ...func(*Options)) (*PutObjectResult, error)
 	AppendObject(context.Context, *AppendObjectRequest, ...func(*Options)) (*AppendObjectResult, error)
-	// AppendFile 追加文件到OSS
 	AppendFile(context.Context, string, string, ...func(*AppendOptions)) (*AppendOnlyFile, error)
 }
 
-// ClientEntity 实现了Client接口
-type ClientEntity struct {
-	*Config
-	ossClient *aliyunoss.Client
+type ossAPI interface {
+	PutObject(context.Context, *PutObjectRequest, ...func(*Options)) (*PutObjectResult, error)
+	PutObjectFromFile(context.Context, *PutObjectRequest, string, ...func(*Options)) (*PutObjectResult, error)
+	AppendObject(context.Context, *AppendObjectRequest, ...func(*Options)) (*AppendObjectResult, error)
+	AppendFile(context.Context, string, string, ...func(*AppendOptions)) (*AppendOnlyFile, error)
 }
 
-// New creates a new OSS client.
-// config: OSS configuration.
-// optFns: Optional configuration functions.
-func New(config *Config, optFns ...func(*Options)) (Client, error) {
-	if config == nil {
-		return nil, fmt.Errorf("ossx: config is required")
+type client struct {
+	api ossAPI
+	raw *aliyunoss.Client
+}
+
+func Open(conf *Config, optFns ...func(*Options)) (Client, error) {
+	return New(conf, optFns...)
+}
+
+func New(conf *Config, optFns ...func(*Options)) (Client, error) {
+	config, err := prepareConfig(conf)
+	if err != nil {
+		return nil, err
 	}
-	client := &ClientEntity{
-		Config: config,
+
+	api := config.newClient(buildSDKConfig(config), optFns...)
+	raw, _ := api.(*aliyunoss.Client)
+	return &client{
+		api: api,
+		raw: raw,
+	}, nil
+}
+
+func NewCredentialsProvider(accessKeyID, accessKeySecret string) credentials.CredentialsProvider {
+	return credentials.NewStaticCredentialsProvider(accessKeyID, accessKeySecret)
+}
+
+func (c *client) Raw() *aliyunoss.Client {
+	return c.raw
+}
+
+func (c *client) PutObject(ctx context.Context, req *PutObjectRequest, optFns ...func(*Options)) (*PutObjectResult, error) {
+	if ctx == nil {
+		return nil, ErrContextRequired
 	}
-	client.ossClient = aliyunoss.NewClient(config, optFns...)
-	return client, nil
+	if req == nil {
+		return nil, ErrRequestRequired
+	}
+	return c.api.PutObject(ctx, req, optFns...)
 }
 
-// NewCredentialsProvider 创建静态凭据提供者
-func NewCredentialsProvider(accessKeyId, accessKeySecret string) credentials.CredentialsProvider {
-	return credentials.NewStaticCredentialsProvider(accessKeyId, accessKeySecret)
+func (c *client) PutObjectFromFile(ctx context.Context, req *PutObjectRequest, filePath string, optFns ...func(*Options)) (*PutObjectResult, error) {
+	if ctx == nil {
+		return nil, ErrContextRequired
+	}
+	if req == nil {
+		return nil, ErrRequestRequired
+	}
+	filePath = strings.TrimSpace(filePath)
+	if filePath == "" {
+		return nil, ErrFilePathRequired
+	}
+	return c.api.PutObjectFromFile(ctx, req, filePath, optFns...)
 }
 
-// PutObject 上传对象到OSS
-func (c *ClientEntity) PutObject(ctx context.Context, req *PutObjectRequest, optFns ...func(*Options)) (*PutObjectResult, error) {
-	return c.ossClient.PutObject(ctx, req, optFns...)
+func (c *client) AppendObject(ctx context.Context, req *AppendObjectRequest, optFns ...func(*Options)) (*AppendObjectResult, error) {
+	if ctx == nil {
+		return nil, ErrContextRequired
+	}
+	if req == nil {
+		return nil, ErrRequestRequired
+	}
+	return c.api.AppendObject(ctx, req, optFns...)
 }
 
-// PutObjectFromFile 从本地文件上传对象到OSS
-func (c *ClientEntity) PutObjectFromFile(ctx context.Context, localFile string, req *PutObjectRequest, optFns ...func(*Options)) (*PutObjectResult, error) {
-	return c.ossClient.PutObjectFromFile(ctx, req, localFile, optFns...)
+func (c *client) AppendFile(ctx context.Context, bucket, key string, optFns ...func(*AppendOptions)) (*AppendOnlyFile, error) {
+	if ctx == nil {
+		return nil, ErrContextRequired
+	}
+	bucket = strings.TrimSpace(bucket)
+	key = strings.TrimSpace(key)
+	if bucket == "" {
+		return nil, ErrBucketRequired
+	}
+	if key == "" {
+		return nil, ErrKeyRequired
+	}
+	return c.api.AppendFile(ctx, bucket, key, optFns...)
 }
 
-// AppendObject 追加对象到OSS
-func (c *ClientEntity) AppendObject(ctx context.Context, req *AppendObjectRequest, optFns ...func(*Options)) (*AppendObjectResult, error) {
-	return c.ossClient.AppendObject(ctx, req, optFns...)
+func prepareConfig(conf *Config) (*Config, error) {
+	if conf == nil {
+		return nil, ErrNilConfig
+	}
+
+	cloned := *conf
+	cloned.Endpoint = strings.TrimSpace(cloned.Endpoint)
+	cloned.Region = strings.TrimSpace(cloned.Region)
+	cloned.AccessKeyID = strings.TrimSpace(cloned.AccessKeyID)
+	cloned.AccessKeySecret = strings.TrimSpace(cloned.AccessKeySecret)
+
+	if cloned.newClient == nil {
+		cloned.newClient = func(cfg *aliyunoss.Config, optFns ...func(*Options)) ossAPI {
+			return aliyunoss.NewClient(cfg, optFns...)
+		}
+	}
+
+	if cloned.Base != nil {
+		base := cloned.Base.Copy()
+		cloned.Base = &base
+	}
+
+	sdkConfig := buildSDKConfig(&cloned)
+	if sdkConfig.Endpoint == nil || strings.TrimSpace(*sdkConfig.Endpoint) == "" {
+		return nil, ErrEndpointRequired
+	}
+	if sdkConfig.Region == nil || strings.TrimSpace(*sdkConfig.Region) == "" {
+		return nil, ErrRegionRequired
+	}
+	if sdkConfig.CredentialsProvider == nil {
+		return nil, ErrCredentialsRequired
+	}
+
+	return &cloned, nil
 }
 
-// AppendFile 追加文件到OSS
-func (c *ClientEntity) AppendFile(ctx context.Context, bucket string, key string, optFns ...func(*AppendOptions)) (*AppendOnlyFile, error) {
-	return c.ossClient.AppendFile(ctx, bucket, key, optFns...)
+func buildSDKConfig(conf *Config) *aliyunoss.Config {
+	var sdkConfig aliyunoss.Config
+	if conf.Base != nil {
+		sdkConfig = conf.Base.Copy()
+	} else {
+		sdkConfig = *aliyunoss.NewConfig()
+	}
+
+	if conf.Endpoint != "" {
+		sdkConfig.WithEndpoint(conf.Endpoint)
+	}
+	if conf.Region != "" {
+		sdkConfig.WithRegion(conf.Region)
+	}
+	if conf.HTTPClient != nil {
+		sdkConfig.WithHttpClient(conf.HTTPClient)
+	}
+	if conf.CredentialsProvider != nil {
+		sdkConfig.WithCredentialsProvider(conf.CredentialsProvider)
+	} else if conf.AccessKeyID != "" && conf.AccessKeySecret != "" {
+		sdkConfig.WithCredentialsProvider(NewCredentialsProvider(conf.AccessKeyID, conf.AccessKeySecret))
+	}
+
+	return &sdkConfig
 }

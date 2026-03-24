@@ -3,7 +3,6 @@ package wsx
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"sync"
 	"time"
 
@@ -35,41 +34,32 @@ type Connect interface {
 	// Close closes the connection and loops.
 	Close() error
 
-	// Conn returns underlying connection (use with caution).
-	Conn() *websocket.Conn
-
-	// ID returns the unique identifier for this connection
-	ID() string
-	// SetID sets the unique identifier
-	SetID(string)
-
 	// RemoteAddr returns the remote network address
 	RemoteAddr() string
 
+	// UserID returns the immutable business identity associated with this connection.
+	UserID() string
+
 	// SessionID returns the unique physical session identifier
 	SessionID() string
+}
 
-	// Get retrieves a value from metadata
-	Get(key string) (value interface{}, exists bool)
-	// Set stores a value in metadata
-	Set(key string, value interface{})
-
-	// Rooms returns the list of rooms this connection has joined
-	Rooms() []string
-	// Internal methods for room management
-	addRoom(room string)
-	removeRoom(room string)
+type roomMember interface {
+	Connect
+	roomCount() int
+	rooms() []string
+	joinRoom(room string)
+	leaveRoom(room string)
 }
 
 type connectEntity struct {
 	conn *websocket.Conn
 
-	id         string
+	userID     string
 	sessionID  string
 	remoteAddr string
-	meta       map[string]interface{}
-	rooms      map[string]struct{}
-	metaMu     sync.RWMutex
+	roomSet    map[string]struct{}
+	roomMu     sync.RWMutex
 
 	heartbeatInterval time.Duration
 	readTimeout       time.Duration
@@ -78,8 +68,10 @@ type connectEntity struct {
 	// Outbound channel
 	sendChan chan message
 
-	closed chan struct{}
-	once   sync.Once
+	closed      chan struct{}
+	closeCtx    context.Context
+	closeCancel context.CancelFunc
+	once        sync.Once
 
 	skipObservability bool
 }
@@ -92,12 +84,15 @@ func NewConnect(conn *websocket.Conn, remoteAddr string, opts ...opt.Option[conn
 	}
 	opt.Each(options, opts...)
 
-	if options.sendBufferSize == 0 {
+	if options.sendBufferSize <= 0 {
 		options.sendBufferSize = 256
 	}
 
+	registerWSMetrics()
+
 	c := &connectEntity{
 		conn:              conn,
+		userID:            options.userID,
 		sessionID:         uuid.NewString(),
 		remoteAddr:        remoteAddr,
 		heartbeatInterval: options.heartbeatInterval,
@@ -105,10 +100,10 @@ func NewConnect(conn *websocket.Conn, remoteAddr string, opts ...opt.Option[conn
 		writeTimeout:      options.writeTimeout,
 		sendChan:          make(chan message, options.sendBufferSize),
 		closed:            make(chan struct{}),
-		meta:              make(map[string]interface{}),
-		rooms:             make(map[string]struct{}),
+		roomSet:           make(map[string]struct{}),
 		skipObservability: options.skipObservability,
 	}
+	c.closeCtx, c.closeCancel = context.WithCancel(context.Background())
 
 	// Metrics: Increment active connections
 	if !c.skipObservability {
@@ -139,13 +134,6 @@ func (c *connectEntity) writeLoop() {
 		}
 	}()
 
-	// Create a context that is cancelled when c.closed is closed
-	ctx, cancel := context.WithCancel(context.Background())
-	go func() {
-		<-c.closed
-		cancel()
-	}()
-
 	var ticker *time.Ticker
 	var tickerC <-chan time.Time
 	if c.heartbeatInterval > 0 {
@@ -166,9 +154,12 @@ func (c *connectEntity) writeLoop() {
 		case <-c.closed:
 			return
 
-		case msg := <-c.sendChan:
+		case msg, ok := <-c.sendChan:
+			if !ok {
+				return
+			}
 			// Write message
-			wCtx, wCancel := context.WithTimeout(ctx, c.writeTimeout)
+			wCtx, wCancel := c.newWriteContext()
 			err := c.conn.Write(wCtx, msg.typ, msg.data)
 			wCancel()
 			if err != nil {
@@ -185,7 +176,7 @@ func (c *connectEntity) writeLoop() {
 
 		case <-tickerC:
 			// Send Ping
-			pCtx, pCancel := context.WithTimeout(ctx, c.writeTimeout)
+			pCtx, pCancel := c.newWriteContext()
 			err := c.conn.Ping(pCtx)
 			pCancel()
 			if err != nil {
@@ -212,11 +203,23 @@ func (c *connectEntity) SendJSON(ctx context.Context, v interface{}) error {
 	return c.send(ctx, message{typ: websocket.MessageText, data: data})
 }
 
-func (c *connectEntity) send(ctx context.Context, msg message) error {
+func (c *connectEntity) send(ctx context.Context, msg message) (err error) {
+	ctx = normalizeContext(ctx)
+	defer func() {
+		if recover() != nil {
+			err = errConnectionClosed
+		}
+	}()
+
+	queued := msg
+	if msg.data != nil {
+		queued.data = append([]byte(nil), msg.data...)
+	}
+
 	select {
-	case <-c.closed:
-		return fmt.Errorf("connection closed")
-	case c.sendChan <- msg:
+	case <-c.closeCtx.Done():
+		return errConnectionClosed
+	case c.sendChan <- queued:
 		return nil
 	case <-ctx.Done():
 		if !c.skipObservability {
@@ -227,6 +230,21 @@ func (c *connectEntity) send(ctx context.Context, msg message) error {
 }
 
 func (c *connectEntity) ReadMessage(ctx context.Context) (websocket.MessageType, []byte, error) {
+	baseCtx := normalizeContext(ctx)
+	if c.readTimeout > 0 {
+		var cancel context.CancelFunc
+		baseCtx, cancel = context.WithTimeout(baseCtx, c.readTimeout)
+		defer cancel()
+	}
+
+	readCtx, cancelRead := context.WithCancel(baseCtx)
+	defer cancelRead()
+
+	stop := context.AfterFunc(c.closeCtx, cancelRead)
+	defer func() {
+		_ = stop()
+	}()
+
 	// Read Loop should run in its own goroutine usually if we want full duplex?
 	// But standard usage is user calls ReadMessage in a loop.
 
@@ -234,7 +252,7 @@ func (c *connectEntity) ReadMessage(ctx context.Context) (websocket.MessageType,
 	// Instead, we pass the original context. The connection will be closed
 	// if the context is cancelled or the Ping loop detects a failure.
 
-	mt, data, err := c.conn.Read(ctx)
+	mt, data, err := c.conn.Read(readCtx)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -246,60 +264,49 @@ func (c *connectEntity) ReadMessage(ctx context.Context) (websocket.MessageType,
 
 func (c *connectEntity) Close() error {
 	c.once.Do(func() {
+		c.closeCancel()
 		close(c.closed)
-		// Close sendChan? No, might panic writers. GC will handle it.
+		close(c.sendChan)
 		_ = c.conn.Close(websocket.StatusNormalClosure, "closed")
 	})
 	return nil
 }
 
-func (c *connectEntity) Conn() *websocket.Conn {
-	return c.conn
+func (c *connectEntity) UserID() string {
+	return c.userID
 }
 
-func (c *connectEntity) ID() string {
-	c.metaMu.RLock()
-	defer c.metaMu.RUnlock()
-	return c.id
-}
-
-func (c *connectEntity) SetID(id string) {
-	c.metaMu.Lock()
-	defer c.metaMu.Unlock()
-	c.id = id
-}
-
-func (c *connectEntity) Get(key string) (value interface{}, exists bool) {
-	c.metaMu.RLock()
-	defer c.metaMu.RUnlock()
-	value, exists = c.meta[key]
-	return
-}
-
-func (c *connectEntity) Set(key string, value interface{}) {
-	c.metaMu.Lock()
-	defer c.metaMu.Unlock()
-	c.meta[key] = value
-}
-
-func (c *connectEntity) Rooms() []string {
-	c.metaMu.RLock()
-	defer c.metaMu.RUnlock()
-	rooms := make([]string, 0, len(c.rooms))
-	for r := range c.rooms {
+func (c *connectEntity) rooms() []string {
+	c.roomMu.RLock()
+	defer c.roomMu.RUnlock()
+	rooms := make([]string, 0, len(c.roomSet))
+	for r := range c.roomSet {
 		rooms = append(rooms, r)
 	}
 	return rooms
 }
 
-func (c *connectEntity) addRoom(room string) {
-	c.metaMu.Lock()
-	defer c.metaMu.Unlock()
-	c.rooms[room] = struct{}{}
+func (c *connectEntity) roomCount() int {
+	c.roomMu.RLock()
+	defer c.roomMu.RUnlock()
+	return len(c.roomSet)
 }
 
-func (c *connectEntity) removeRoom(room string) {
-	c.metaMu.Lock()
-	defer c.metaMu.Unlock()
-	delete(c.rooms, room)
+func (c *connectEntity) joinRoom(room string) {
+	c.roomMu.Lock()
+	defer c.roomMu.Unlock()
+	c.roomSet[room] = struct{}{}
+}
+
+func (c *connectEntity) leaveRoom(room string) {
+	c.roomMu.Lock()
+	defer c.roomMu.Unlock()
+	delete(c.roomSet, room)
+}
+
+func (c *connectEntity) newWriteContext() (context.Context, context.CancelFunc) {
+	if c.writeTimeout > 0 {
+		return context.WithTimeout(context.Background(), c.writeTimeout)
+	}
+	return context.WithCancel(context.Background())
 }

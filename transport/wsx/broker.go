@@ -10,6 +10,8 @@ type MessageBroker interface {
 	Subscribe(ctx context.Context, channel string, handler func(msg []byte)) error
 	// Publish 发布消息到频道
 	Publish(ctx context.Context, channel string, msg []byte) error
+	// NumSubscribers 返回当前频道订阅者数量
+	NumSubscribers(ctx context.Context, channel string) (int64, error)
 	// Close 关闭代理连接
 	Close() error
 }

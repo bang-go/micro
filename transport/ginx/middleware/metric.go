@@ -1,7 +1,8 @@
-package ginx
+package middleware
 
 import (
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -9,78 +10,120 @@ import (
 )
 
 var (
-	// RequestDurationHistogram 记录请求耗时分布
-	RequestDurationHistogram = prometheus.NewHistogramVec(
+	requestDurationHistogram = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
-			Name:    "http_server_request_duration_seconds",
-			Help:    "HTTP server request duration in seconds",
+			Name:    "ginx_server_request_duration_seconds",
+			Help:    "Gin HTTP server request duration in seconds.",
 			Buckets: []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10},
 		},
-		[]string{"method", "path", "status"},
+		[]string{"method", "route", "status"},
 	)
-
-	// RequestCounter 记录请求总数
-	RequestCounter = prometheus.NewCounterVec(
+	requestCounter = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
-			Name: "http_server_requests_total",
-			Help: "HTTP server requests total",
+			Name: "ginx_server_requests_total",
+			Help: "Total number of Gin HTTP server requests.",
 		},
-		[]string{"method", "path", "status"},
+		[]string{"method", "route", "status"},
 	)
-	// RequestInFlight 记录当前并发请求数
-	RequestInFlight = prometheus.NewGaugeVec(
+	requestInFlight = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
-			Name: "http_server_requests_in_flight",
-			Help: "HTTP server requests currently processing",
+			Name: "ginx_server_requests_in_flight",
+			Help: "Current number of in-flight Gin HTTP server requests.",
 		},
-		[]string{"method", "path"},
+		[]string{"method", "route"},
 	)
 )
 
-func init() {
-	// Register metrics
-	prometheus.MustRegister(RequestDurationHistogram)
-	prometheus.MustRegister(RequestCounter)
-	prometheus.MustRegister(RequestInFlight)
+type Metrics struct {
+	RequestDuration  *prometheus.HistogramVec
+	RequestsTotal    *prometheus.CounterVec
+	RequestsInFlight *prometheus.GaugeVec
 }
 
-// MetricMiddleware returns a gin.HandlerFunc (middleware) that records metrics
-// skipPaths: paths to ignore
-func MetricMiddleware(skipPaths ...string) gin.HandlerFunc {
-	// Create a map for faster lookup
-	skipMap := make(map[string]struct{}, len(skipPaths))
-	for _, p := range skipPaths {
-		skipMap[p] = struct{}{}
+var (
+	defaultMetricsOnce sync.Once
+	defaultMetrics     *Metrics
+)
+
+func DefaultMetrics() *Metrics {
+	defaultMetricsOnce.Do(func() {
+		defaultMetrics = &Metrics{
+			RequestDuration:  requestDurationHistogram,
+			RequestsTotal:    requestCounter,
+			RequestsInFlight: requestInFlight,
+		}
+		mustRegisterCollector(prometheus.DefaultRegisterer, &defaultMetrics.RequestDuration, defaultMetrics.RequestDuration)
+		mustRegisterCollector(prometheus.DefaultRegisterer, &defaultMetrics.RequestsTotal, defaultMetrics.RequestsTotal)
+		mustRegisterCollector(prometheus.DefaultRegisterer, &defaultMetrics.RequestsInFlight, defaultMetrics.RequestsInFlight)
+		requestDurationHistogram = defaultMetrics.RequestDuration
+		requestCounter = defaultMetrics.RequestsTotal
+		requestInFlight = defaultMetrics.RequestsInFlight
+	})
+
+	return defaultMetrics
+}
+
+func NewMetrics(registerer prometheus.Registerer) *Metrics {
+	metrics := &Metrics{
+		RequestDuration: prometheus.NewHistogramVec(
+			prometheus.HistogramOpts{
+				Name:    "ginx_server_request_duration_seconds",
+				Help:    "Gin HTTP server request duration in seconds.",
+				Buckets: []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10},
+			},
+			[]string{"method", "route", "status"},
+		),
+		RequestsTotal: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "ginx_server_requests_total",
+				Help: "Total number of Gin HTTP server requests.",
+			},
+			[]string{"method", "route", "status"},
+		),
+		RequestsInFlight: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: "ginx_server_requests_in_flight",
+				Help: "Current number of in-flight Gin HTTP server requests.",
+			},
+			[]string{"method", "route"},
+		),
 	}
+	mustRegisterCollector(registerer, &metrics.RequestDuration, metrics.RequestDuration)
+	mustRegisterCollector(registerer, &metrics.RequestsTotal, metrics.RequestsTotal)
+	mustRegisterCollector(registerer, &metrics.RequestsInFlight, metrics.RequestsInFlight)
+	return metrics
+}
+
+func MetricMiddleware(skipPaths ...string) gin.HandlerFunc {
+	return MetricMiddlewareWithMetrics(DefaultMetrics(), skipPaths...)
+}
+
+func MetricMiddlewareWithMetrics(metrics *Metrics, skipPaths ...string) gin.HandlerFunc {
+	if metrics == nil {
+		metrics = DefaultMetrics()
+	}
+	skipMap := newSkipPathSet(skipPaths)
 
 	return func(c *gin.Context) {
-		// Check if path should be skipped
-		if _, ok := skipMap[c.FullPath()]; ok {
-			c.Next()
-			return
-		}
-		// Also check RequestURI for exact matches like /healthz if FullPath is not set or different
-		if _, ok := skipMap[c.Request.URL.Path]; ok {
+		if shouldSkip(skipMap, c.Request.URL.Path) {
 			c.Next()
 			return
 		}
 
 		start := time.Now()
 		method := c.Request.Method
-		path := c.FullPath()
-		if path == "" {
-			path = "unknown"
-		}
+		route := routeLabel(c)
 
-		RequestInFlight.WithLabelValues(method, path).Inc()
-		defer RequestInFlight.WithLabelValues(method, path).Dec()
+		metrics.RequestsInFlight.WithLabelValues(method, route).Inc()
+		defer metrics.RequestsInFlight.WithLabelValues(method, route).Dec()
 
 		c.Next()
 
 		duration := time.Since(start).Seconds()
 		status := strconv.Itoa(c.Writer.Status())
+		route = routeLabel(c)
 
-		RequestDurationHistogram.WithLabelValues(method, path, status).Observe(duration)
-		RequestCounter.WithLabelValues(method, path, status).Inc()
+		metrics.RequestDuration.WithLabelValues(method, route, status).Observe(duration)
+		metrics.RequestsTotal.WithLabelValues(method, route, status).Inc()
 	}
 }

@@ -1,36 +1,126 @@
 package discovery
 
 import (
-	"fmt"
+	"strconv"
+	"strings"
 
 	"github.com/nacos-group/nacos-sdk-go/v2/clients"
 	"github.com/nacos-group/nacos-sdk-go/v2/clients/naming_client"
+	"github.com/nacos-group/nacos-sdk-go/v2/common/constant"
+	"github.com/nacos-group/nacos-sdk-go/v2/common/security"
 	"github.com/nacos-group/nacos-sdk-go/v2/vo"
 )
 
-type Config vo.NacosClientParam
+type Config struct {
+	ClientConfig          *constant.ClientConfig
+	ServerConfigs         []constant.ServerConfig
+	RamCredentialProvider security.RamCredentialProvider
+}
 
-// New 创建新的 Nacos 服务发现客户端
-// conf: Nacos 客户端配置
-// 返回: INamingClient 实例和错误
-// 文档地址: https://github.com/nacos-group/nacos-sdk-go
-func New(conf *Config) (naming_client.INamingClient, error) {
-	if conf == nil {
-		return nil, fmt.Errorf("Config 不能为 nil")
-	}
-	if conf.ClientConfig == nil {
-		return nil, fmt.Errorf("ClientConfig 不能为 nil")
-	}
-	if len(conf.ServerConfigs) == 0 {
-		return nil, fmt.Errorf("ServerConfigs 不能为空")
-	}
-
-	client, err := clients.NewNamingClient(vo.NacosClientParam{
-		ClientConfig:  conf.ClientConfig,
-		ServerConfigs: conf.ServerConfigs,
-	})
+func Open(conf *Config) (naming_client.INamingClient, error) {
+	param, err := prepareConfig(conf)
 	if err != nil {
-		return nil, fmt.Errorf("创建 Nacos 服务发现客户端失败: %w", err)
+		return nil, err
 	}
-	return client, nil
+	return clients.NewNamingClient(param)
+}
+
+func New(conf *Config) (naming_client.INamingClient, error) {
+	return Open(conf)
+}
+
+func prepareConfig(conf *Config) (vo.NacosClientParam, error) {
+	if conf == nil {
+		return vo.NacosClientParam{}, ErrNilConfig
+	}
+
+	clientConfig := cloneClientConfig(conf.ClientConfig)
+	if clientConfig == nil {
+		clientConfig = constant.NewClientConfig()
+	}
+
+	serverConfigs := cloneServerConfigs(conf.ServerConfigs)
+	if len(serverConfigs) == 0 && strings.TrimSpace(clientConfig.Endpoint) == "" {
+		return vo.NacosClientParam{}, ErrServerConfigMiss
+	}
+
+	return vo.NacosClientParam{
+		ClientConfig:          clientConfig,
+		ServerConfigs:         serverConfigs,
+		RamCredentialProvider: conf.RamCredentialProvider,
+	}, nil
+}
+
+func cloneClientConfig(src *constant.ClientConfig) *constant.ClientConfig {
+	if src == nil {
+		return nil
+	}
+
+	cloned := *src
+	cloned.Endpoint = strings.TrimSpace(cloned.Endpoint)
+	if src.RamConfig != nil {
+		ramConfig := *src.RamConfig
+		cloned.RamConfig = &ramConfig
+	}
+	if src.KMSv3Config != nil {
+		kmsv3Config := *src.KMSv3Config
+		cloned.KMSv3Config = &kmsv3Config
+	}
+	if src.KMSConfig != nil {
+		kmsConfig := *src.KMSConfig
+		cloned.KMSConfig = &kmsConfig
+	}
+	if src.LogSampling != nil {
+		sampling := *src.LogSampling
+		cloned.LogSampling = &sampling
+	}
+	if src.LogRollingConfig != nil {
+		rolling := *src.LogRollingConfig
+		cloned.LogRollingConfig = &rolling
+	}
+	if src.AppConnLabels != nil {
+		cloned.AppConnLabels = make(map[string]string, len(src.AppConnLabels))
+		for key, value := range src.AppConnLabels {
+			cloned.AppConnLabels[key] = value
+		}
+	}
+	return &cloned
+}
+
+func cloneServerConfigs(src []constant.ServerConfig) []constant.ServerConfig {
+	if len(src) == 0 {
+		return nil
+	}
+
+	cloned := make([]constant.ServerConfig, 0, len(src))
+	seen := make(map[string]struct{}, len(src))
+	for _, serverConfig := range src {
+		serverConfig.Scheme = strings.ToLower(strings.TrimSpace(serverConfig.Scheme))
+		serverConfig.ContextPath = strings.TrimSpace(serverConfig.ContextPath)
+		serverConfig.IpAddr = strings.TrimSpace(serverConfig.IpAddr)
+
+		if isBlankServerConfig(serverConfig) {
+			continue
+		}
+
+		key := serverConfig.Scheme + "\x00" + serverConfig.ContextPath + "\x00" + serverConfig.IpAddr + "\x00" +
+			strconv.FormatUint(serverConfig.Port, 10) + "\x00" + strconv.FormatUint(serverConfig.GrpcPort, 10)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		cloned = append(cloned, serverConfig)
+	}
+	if len(cloned) == 0 {
+		return nil
+	}
+	return cloned
+}
+
+func isBlankServerConfig(conf constant.ServerConfig) bool {
+	return conf.Scheme == "" &&
+		conf.ContextPath == "" &&
+		conf.IpAddr == "" &&
+		conf.Port == 0 &&
+		conf.GrpcPort == 0
 }

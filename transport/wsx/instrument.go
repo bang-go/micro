@@ -50,16 +50,3 @@ var (
 		Help: "Total number of limit exceeded events",
 	}, []string{"type"})
 )
-
-func init() {
-	// Register metrics with Prometheus default registry
-	// If you use a custom registry, you might want to export a Register function instead.
-	// For simplicity/convention, we register to default.
-	prometheus.MustRegister(connActive)
-	prometheus.MustRegister(msgReceived)
-	prometheus.MustRegister(msgSent)
-	prometheus.MustRegister(hubBroadcast)
-	prometheus.MustRegister(hubKick)
-	prometheus.MustRegister(hubRoomOps)
-	prometheus.MustRegister(limitExceeded)
-}

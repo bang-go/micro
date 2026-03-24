@@ -1,58 +1,36 @@
 # viperx
 
-`viperx` 是基于 `spf13/viper` 的配置加载器封装，专为微服务的多环境配置设计。
+`viperx` 是一个面向微服务的 `viper` 装配层，负责把环境模式、配置文件查找、环境变量覆盖和热更新边界整理干净。
 
-## ✨ 特性
+## 设计原则
 
-*   **多环境支持**：自动根据环境变量 `APP_ENV` 加载对应的配置文件（如 `application.dev.yaml`, `application.prod.yaml`）。
-*   **热更新**：支持配置文件修改后的自动热加载 (Watch)。
-*   **环境变量覆盖**：支持使用环境变量覆盖配置项（如 `APP_NAME` 覆盖 `app.name`）。
-*   **默认配置**：内置合理的默认值，零配置也可启动。
+- 优先尝试环境专属配置文件，例如 `application.dev.yaml`，不存在时再回退到基础文件。
+- 环境变量始终可以覆盖文件配置，优先级清晰。
+- 配置文件不是强依赖，默认允许纯 ENV 启动；只有显式要求时才因缺文件失败。
+- 只有在实际加载到配置文件时才开启 watch，避免空 watch 带来误判。
 
-## 🚀 快速开始
-
-### 1. 配置文件 (application.yaml)
-
-```yaml
-server:
-  port: 8080
-  name: demo
-```
-
-### 2. 加载配置
+## 快速开始
 
 ```go
-import "github.com/bang-go/micro/conf/viperx"
-
-func main() {
-    // 加载配置
-    v, err := viperx.New(&viperx.Config{
-        Name:  "application", // 文件名前缀
-        Type:  "yaml",        // 文件类型
-        Path:  "./config",    // 路径
-        Watch: true,          // 开启热更新
-    })
-    if err != nil {
-        panic(err)
-    }
-
-    // 读取配置
-    port := v.GetInt("server.port")
-    name := v.GetString("server.name")
+cfg, err := viperx.Open(&viperx.Config{
+    Name: "application",
+    Type: "yaml",
+    Paths: []string{"./conf"},
+    Watch: true,
+    OnChange: func(v *viper.Viper, event fsnotify.Event) {
+        fmt.Println("config changed:", event.Name)
+    },
+})
+if err != nil {
+    panic(err)
 }
+
+port := cfg.GetInt("server.port")
 ```
 
-### 3. 环境变量覆盖
+## 默认行为
 
-设置环境变量 `SERVER_PORT=9090` 将自动覆盖配置文件中的 `server.port`。
-
-## ⚙️ 配置说明
-
-```go
-type Config struct {
-    Name    string // 配置文件名 (默认 "application")
-    Type    string // 配置文件类型 (默认 "yaml")
-    Path    string // 搜索路径 (默认 ".")
-    Watch   bool   // 是否开启热更新
-}
-```
+- `Mode` 为空时，自动读取 `envx.Active()`
+- `Paths` 为空时，默认使用当前目录 `.`
+- `RequireFile` 默认关闭，支持只靠环境变量启动
+- `EnvPrefix` 可选；未设置时直接按配置 key 映射环境变量，如 `server.port -> SERVER_PORT`

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/elastic/go-elasticsearch/v9"
 	"github.com/elastic/go-elasticsearch/v9/typedapi/core/bulk"
@@ -21,469 +22,398 @@ import (
 	"github.com/elastic/go-elasticsearch/v9/typedapi/types"
 )
 
-// Config Elasticsearch 客户端配置
+var (
+	ErrNilConfig              = errors.New("elasticsearchx: config is required")
+	ErrContextRequired        = errors.New("elasticsearchx: context is required")
+	ErrAddressRequired        = errors.New("elasticsearchx: at least one address or cloud id is required")
+	ErrIndexRequired          = errors.New("elasticsearchx: index is required")
+	ErrDocumentRequired       = errors.New("elasticsearchx: document is required")
+	ErrIDRequired             = errors.New("elasticsearchx: document id is required")
+	ErrSearchRequestRequired  = errors.New("elasticsearchx: search request is required")
+	ErrBulkOperationsRequired = errors.New("elasticsearchx: bulk operations are required")
+	ErrBulkActionRequired     = errors.New("elasticsearchx: bulk action is required")
+	ErrBulkUpdateDocRequired  = errors.New("elasticsearchx: bulk update doc is required")
+	ErrBulkDocumentRequired   = errors.New("elasticsearchx: bulk document is required")
+)
+
 type Config struct {
-	// Addresses Elasticsearch 服务器地址列表，例如: []string{"http://localhost:9200"}
 	Addresses []string
-	// Username 用户名（可选）
-	Username string
-	// Password 密码（可选）
-	Password string
-	// APIKey API 密钥（可选，用于 Elastic Cloud）
-	APIKey string
-	// CloudID Cloud ID（可选，用于 Elastic Cloud）
-	CloudID string
-	// CACert CA 证书内容（可选，用于 TLS）
-	CACert []byte
-	// Header 自定义请求头（可选）
-	// 注意：类型化 API 的 Header 设置会覆盖客户端级别的 Header 配置
-	// 如果需要自定义 Header，建议通过 GetClient() 获取底层客户端自行设置
-	Header map[string]string
+	Username  string
+	Password  string
+	APIKey    string
+	CloudID   string
+	CACert    []byte
+	Header    http.Header
+	Transport http.RoundTripper
+
+	newClient      func(elasticsearch.Config) (*elasticsearch.Client, error)
+	newTypedClient func(elasticsearch.Config) (*elasticsearch.TypedClient, error)
 }
 
-// Client Elasticsearch 客户端接口
 type Client interface {
-	// CreateIndex ========== 索引操作 ==========
-	// CreateIndex 创建索引（返回结构化类型）
-	CreateIndex(index string, mapping map[string]interface{}) (*create.Response, error)
-	// GetIndex 获取索引信息（返回结构化类型）
-	GetIndex(index string) (indicesget.Response, error)
-	// ExistsIndex 检查索引是否存在
-	ExistsIndex(index string) (bool, error)
-	// DeleteIndex 删除索引（返回结构化类型）
-	DeleteIndex(index string) (*indicesdelete.Response, error)
+	CreateIndex(context.Context, string, any) (*create.Response, error)
+	GetIndex(context.Context, string) (indicesget.Response, error)
+	ExistsIndex(context.Context, string) (bool, error)
+	DeleteIndex(context.Context, string) (*indicesdelete.Response, error)
 
-	// Index ========== 文档操作 ==========
-	// Index 索引文档（增，返回结构化类型）
-	Index(index, id string, document interface{}) (*index.Response, error)
-	// Get 获取文档（查，返回结构化类型）
-	Get(index, id string) (*get.Response, error)
-	// Update 更新文档（改，返回结构化类型）
-	Update(index, id string, doc map[string]interface{}) (*update.Response, error)
-	// Delete 删除文档（删，返回结构化类型）
-	Delete(index, id string) (*delete.Response, error)
-	// Search 搜索文档（类型化 API，支持 context）
-	// 使用完全类型化 API，提供类型安全性和完整功能支持
-	Search(ctx context.Context, index string, request *search.Request) (*search.Response, error)
-	// Bulk 批量操作（返回结构化类型）
-	Bulk(operations []BulkOperation) (*bulk.Response, error)
+	Index(context.Context, string, string, any) (*index.Response, error)
+	Get(context.Context, string, string) (*get.Response, error)
+	Update(context.Context, string, string, map[string]any) (*update.Response, error)
+	Delete(context.Context, string, string) (*delete.Response, error)
+	Search(context.Context, string, *search.Request) (*search.Response, error)
+	Bulk(context.Context, []BulkOperation) (*bulk.Response, error)
 
-	// GetClient ========== 高级操作 ==========
-	// GetClient 获取底层客户端（用于高级操作）
+	Raw() *elasticsearch.TypedClient
+	RawLowLevel() *elasticsearch.Client
 	GetClient() *elasticsearch.TypedClient
-	// GetLowLevelClient 获取底层低级别客户端
 	GetLowLevelClient() *elasticsearch.Client
 }
 
-// BulkOperation 批量操作
 type BulkOperation struct {
-	// Action 操作类型: index, create, update, delete
-	Action string
-	// Index 索引名称
-	Index string
-	// ID 文档 ID（可选，用于 index, create, update, delete）
-	ID string
-	// Document 文档内容（用于 index, create, update）
-	Document interface{}
-	// Doc 更新内容（用于 update）
-	Doc map[string]interface{}
+	Action   string
+	Index    string
+	ID       string
+	Document any
+	Doc      map[string]any
 }
 
-// ClientEntity 实现了 Client 接口
-type ClientEntity struct {
-	config         *Config
-	typedClient    *elasticsearch.TypedClient
-	lowLevelClient *elasticsearch.Client
+type client struct {
+	typed *elasticsearch.TypedClient
+	raw   *elasticsearch.Client
 }
 
-// New 创建新的 Elasticsearch 客户端
-// config: Elasticsearch 配置
-// 返回: Client 实例和错误
-// 使用示例：
-//
-//	// 本地连接
-//	client, err := New(&Config{
-//	    Addresses: []string{"http://localhost:9200"},
-//	})
-//
-//	// 使用用户名密码
-//	client, err := New(&Config{
-//	    Addresses: []string{"http://localhost:9200"},
-//	    Username:  "elastic",
-//	    Password:  "password",
-//	})
-//
-//	// Elastic Cloud 连接
-//	client, err := New(&Config{
-//	    CloudID: "your-cloud-id",
-//	    APIKey:  "your-api-key",
-//	})
-func New(config *Config) (Client, error) {
-	if config == nil {
-		return nil, errors.New("esx: config is required")
-	}
-	if len(config.Addresses) == 0 && config.CloudID == "" {
-		return nil, errors.New("esx: either Addresses or CloudID must be set")
-	}
+func Open(conf *Config) (Client, error) {
+	return New(conf)
+}
 
-	cfg := elasticsearch.Config{}
-
-	// 设置地址
-	if len(config.Addresses) > 0 {
-		cfg.Addresses = config.Addresses
-	}
-
-	// 设置 CloudID（用于 Elastic Cloud）
-	if config.CloudID != "" {
-		cfg.CloudID = config.CloudID
-	}
-
-	// 设置认证
-	if config.APIKey != "" {
-		cfg.APIKey = config.APIKey
-	} else if config.Username != "" && config.Password != "" {
-		cfg.Username = config.Username
-		cfg.Password = config.Password
-	}
-
-	// 设置 CA 证书
-	if len(config.CACert) > 0 {
-		cfg.CACert = config.CACert
-	}
-
-	// 设置请求头
-	// 默认使用 application/json，解决 media_type_header_exception 错误
-	// Elasticsearch 8.0+ 要求明确指定 Content-Type 和 Accept 为 application/json
-	// 如果用户自定义了 Header，会与默认值合并（用户自定义的优先级更高）
-	cfg.Header = http.Header{
-		"Content-Type": []string{"application/json"},
-		"Accept":       []string{"application/json"},
-	}
-	// 如果用户自定义了 Header，合并到默认 Header 中（用户自定义的会覆盖默认值）
-	if len(config.Header) > 0 {
-		for k, v := range config.Header {
-			cfg.Header[k] = []string{v}
-		}
-	}
-
-	// 创建低级别客户端
-	lowLevelClient, err := elasticsearch.NewClient(cfg)
+func New(conf *Config) (Client, error) {
+	config, err := prepareConfig(conf)
 	if err != nil {
-		return nil, fmt.Errorf("esx: create client failed: %w", err)
+		return nil, err
 	}
 
-	// 创建类型化客户端（使用相同的配置，包括 Header）
-	// 类型化 API 在某些服务器上也需要正确的 Header 设置
-	typedClient, err := elasticsearch.NewTypedClient(cfg)
+	esConfig := elasticsearch.Config{
+		Addresses: config.Addresses,
+		Username:  config.Username,
+		Password:  config.Password,
+		APIKey:    config.APIKey,
+		CloudID:   config.CloudID,
+		CACert:    append([]byte(nil), config.CACert...),
+		Header:    cloneHeader(config.Header),
+		Transport: config.Transport,
+	}
+
+	raw, err := config.newClient(esConfig)
 	if err != nil {
-		return nil, fmt.Errorf("esx: create typed client failed: %w", err)
+		return nil, fmt.Errorf("elasticsearchx: create low-level client failed: %w", err)
+	}
+	typed, err := config.newTypedClient(esConfig)
+	if err != nil {
+		return nil, fmt.Errorf("elasticsearchx: create typed client failed: %w", err)
 	}
 
-	return &ClientEntity{
-		config:         config,
-		typedClient:    typedClient,
-		lowLevelClient: lowLevelClient,
+	return &client{
+		typed: typed,
+		raw:   raw,
 	}, nil
 }
 
-// CreateIndex 创建索引
-// 使用完全类型化 API：typedClient.Indices.Create(index).Request(&create.Request{...}).Do(ctx)
-// 返回结构化类型，提供类型安全性
-func (c *ClientEntity) CreateIndex(index string, mapping map[string]interface{}) (*create.Response, error) {
-	if index == "" {
-		return nil, errors.New("index 不能为空")
+func (c *client) CreateIndex(ctx context.Context, name string, mapping any) (*create.Response, error) {
+	if ctx == nil {
+		return nil, ErrContextRequired
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil, ErrIndexRequired
 	}
 
-	req := &create.Request{}
+	req := c.typed.Indices.Create(name)
 	if mapping != nil {
-		// 将 mapping 转换为 JSON 再解析为类型化结构
-		mappingBytes, err := json.Marshal(mapping)
+		body, err := marshalBody(mapping)
 		if err != nil {
-			return nil, fmt.Errorf("序列化 mapping 失败: %w", err)
+			return nil, fmt.Errorf("elasticsearchx: encode create index body failed: %w", err)
 		}
-		if err := json.Unmarshal(mappingBytes, req); err != nil {
-			// 如果解析失败，使用 Raw 方法传递原始 JSON
-			resp, err := c.typedClient.Indices.Create(index).
-				Raw(bytes.NewReader(mappingBytes)).
-				Header("Content-Type", "application/json").
-				Header("Accept", "application/json").
-				Do(context.Background())
-			return resp, err
-		}
+		req = req.Raw(bytes.NewReader(body))
 	}
-
-	resp, err := c.typedClient.Indices.Create(index).
-		Request(req).
-		Header("Content-Type", "application/json").
-		Header("Accept", "application/json").
-		Do(context.Background())
-	if err != nil {
-		return nil, fmt.Errorf("创建索引失败: %w", err)
-	}
-
-	return resp, nil
+	return req.Do(ctx)
 }
 
-// GetIndex 获取索引信息
-// 使用完全类型化 API：typedClient.Indices.Get(index).Do(ctx)
-// 返回结构化类型，提供类型安全性
-func (c *ClientEntity) GetIndex(index string) (indicesget.Response, error) {
-	if index == "" {
-		return nil, errors.New("index 不能为空")
+func (c *client) GetIndex(ctx context.Context, name string) (indicesget.Response, error) {
+	if ctx == nil {
+		return nil, ErrContextRequired
 	}
-
-	resp, err := c.typedClient.Indices.Get(index).
-		Header("Content-Type", "application/json").
-		Header("Accept", "application/json").
-		Do(context.Background())
-	if err != nil {
-		return nil, fmt.Errorf("获取索引信息失败: %w", err)
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil, ErrIndexRequired
 	}
-
-	return resp, nil
+	return c.typed.Indices.Get(name).Do(ctx)
 }
 
-// ExistsIndex 检查索引是否存在
-// 使用完全类型化 API：typedClient.Indices.Exists(index).Do(ctx)
-func (c *ClientEntity) ExistsIndex(index string) (bool, error) {
-	if index == "" {
-		return false, errors.New("index 不能为空")
+func (c *client) ExistsIndex(ctx context.Context, name string) (bool, error) {
+	if ctx == nil {
+		return false, ErrContextRequired
 	}
-
-	exists, err := c.typedClient.Indices.Exists(index).
-		Header("Content-Type", "application/json").
-		Header("Accept", "application/json").
-		Do(context.Background())
-	if err != nil {
-		return false, fmt.Errorf("检查索引是否存在失败: %w", err)
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return false, ErrIndexRequired
 	}
-
-	return exists, nil
+	return c.typed.Indices.Exists(name).Do(ctx)
 }
 
-// DeleteIndex 删除索引
-// 使用完全类型化 API：typedClient.Indices.Delete(index).Do(ctx)
-// 返回结构化类型，提供类型安全性
-func (c *ClientEntity) DeleteIndex(index string) (*indicesdelete.Response, error) {
-	if index == "" {
-		return nil, errors.New("index 不能为空")
+func (c *client) DeleteIndex(ctx context.Context, name string) (*indicesdelete.Response, error) {
+	if ctx == nil {
+		return nil, ErrContextRequired
 	}
-
-	resp, err := c.typedClient.Indices.Delete(index).
-		Header("Content-Type", "application/json").
-		Header("Accept", "application/json").
-		Do(context.Background())
-	if err != nil {
-		return nil, fmt.Errorf("删除索引失败: %w", err)
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil, ErrIndexRequired
 	}
-
-	return resp, nil
+	return c.typed.Indices.Delete(name).Do(ctx)
 }
 
-// Index 索引文档
-// 使用完全类型化 API：typedClient.Index(index).Id(id).Document(document).Do(ctx)
-// 返回结构化类型，提供类型安全性
-func (c *ClientEntity) Index(index, id string, document interface{}) (*index.Response, error) {
-	if index == "" {
-		return nil, errors.New("index 不能为空")
+func (c *client) Index(ctx context.Context, name, id string, document any) (*index.Response, error) {
+	if ctx == nil {
+		return nil, ErrContextRequired
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil, ErrIndexRequired
+	}
+	if document == nil {
+		return nil, ErrDocumentRequired
 	}
 
-	req := c.typedClient.Index(index).
-		Document(document).
-		Header("Content-Type", "application/json").
-		Header("Accept", "application/json")
-
-	if id != "" {
-		req = req.Id(id)
+	req := c.typed.Index(name).Request(document)
+	if trimmedID := strings.TrimSpace(id); trimmedID != "" {
+		req = req.Id(trimmedID)
 	}
-
-	resp, err := req.Do(context.Background())
-	if err != nil {
-		return nil, fmt.Errorf("索引文档失败: %w", err)
-	}
-
-	return resp, nil
+	return req.Do(ctx)
 }
 
-// Get 获取文档
-// 使用完全类型化 API：typedClient.Get(index, id).Do(ctx)
-// 返回结构化类型，提供类型安全性
-func (c *ClientEntity) Get(index, id string) (*get.Response, error) {
-	if index == "" {
-		return nil, errors.New("index 不能为空")
+func (c *client) Get(ctx context.Context, name, id string) (*get.Response, error) {
+	if ctx == nil {
+		return nil, ErrContextRequired
 	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil, ErrIndexRequired
+	}
+	id = strings.TrimSpace(id)
 	if id == "" {
-		return nil, errors.New("id 不能为空")
+		return nil, ErrIDRequired
 	}
-
-	resp, err := c.typedClient.Get(index, id).
-		Header("Content-Type", "application/json").
-		Header("Accept", "application/json").
-		Do(context.Background())
-	if err != nil {
-		return nil, fmt.Errorf("获取文档失败: %w", err)
-	}
-
-	if !resp.Found {
-		return nil, fmt.Errorf("文档不存在: index=%s, id=%s", index, id)
-	}
-
-	return resp, nil
+	return c.typed.Get(name, id).Do(ctx)
 }
 
-// Update 更新文档
-// 使用完全类型化 API：typedClient.Update(index, id).Request(&update.Request{Doc: doc}).Do(ctx)
-// 返回结构化类型，提供类型安全性
-func (c *ClientEntity) Update(index, id string, doc map[string]interface{}) (*update.Response, error) {
-	if index == "" {
-		return nil, errors.New("index 不能为空")
+func (c *client) Update(ctx context.Context, name, id string, doc map[string]any) (*update.Response, error) {
+	if ctx == nil {
+		return nil, ErrContextRequired
 	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil, ErrIndexRequired
+	}
+	id = strings.TrimSpace(id)
 	if id == "" {
-		return nil, errors.New("id 不能为空")
+		return nil, ErrIDRequired
+	}
+	if len(doc) == 0 {
+		return nil, ErrDocumentRequired
 	}
 
-	docBytes, err := json.Marshal(doc)
+	body, err := marshalBody(map[string]any{"doc": doc})
 	if err != nil {
-		return nil, fmt.Errorf("序列化更新文档失败: %w", err)
+		return nil, fmt.Errorf("elasticsearchx: encode update body failed: %w", err)
 	}
-
-	req := &update.Request{
-		Doc: docBytes,
-	}
-
-	resp, err := c.typedClient.Update(index, id).
-		Request(req).
-		Header("Content-Type", "application/json").
-		Header("Accept", "application/json").
-		Do(context.Background())
-	if err != nil {
-		return nil, fmt.Errorf("更新文档失败: %w", err)
-	}
-
-	return resp, nil
+	return c.typed.Update(name, id).Raw(bytes.NewReader(body)).Do(ctx)
 }
 
-// Delete 删除文档
-// 使用完全类型化 API：typedClient.Delete(index, id).Do(ctx)
-// 返回结构化类型，提供类型安全性
-func (c *ClientEntity) Delete(index, id string) (*delete.Response, error) {
-	if index == "" {
-		return nil, errors.New("index 不能为空")
+func (c *client) Delete(ctx context.Context, name, id string) (*delete.Response, error) {
+	if ctx == nil {
+		return nil, ErrContextRequired
 	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil, ErrIndexRequired
+	}
+	id = strings.TrimSpace(id)
 	if id == "" {
-		return nil, errors.New("id 不能为空")
+		return nil, ErrIDRequired
 	}
-
-	resp, err := c.typedClient.Delete(index, id).
-		Header("Content-Type", "application/json").
-		Header("Accept", "application/json").
-		Do(context.Background())
-	if err != nil {
-		return nil, fmt.Errorf("删除文档失败: %w", err)
-	}
-
-	return resp, nil
+	return c.typed.Delete(name, id).Do(ctx)
 }
 
-// Search 搜索文档（类型化 API）
-// 使用官方推荐的方式：typedClient.Search().Index("my_index").Request(&search.Request{...}).Do(context)
-// 通过 Header() 方法显式设置 Content-Type 和 Accept 头，解决 media_type_header_exception 错误
-// 参考：https://www.elastic.co/docs/reference/elasticsearch/clients/go/getting-started#_searching_documents
-func (c *ClientEntity) Search(ctx context.Context, index string, request *search.Request) (*search.Response, error) {
-	if index == "" {
-		return nil, errors.New("index 不能为空")
+func (c *client) Search(ctx context.Context, name string, request *search.Request) (*search.Response, error) {
+	if ctx == nil {
+		return nil, ErrContextRequired
 	}
-
-	// 使用完全类型化 API，保持类型安全性和代码清晰度
-	return c.typedClient.Search().
-		Index(index).
-		Request(request).
-		Header("Content-Type", "application/json").
-		Header("Accept", "application/json").
-		Do(ctx)
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil, ErrIndexRequired
+	}
+	if request == nil {
+		return nil, ErrSearchRequestRequired
+	}
+	return c.typed.Search().Index(name).Request(request).Do(ctx)
 }
 
-// Bulk 批量操作
-// 使用完全类型化 API：typedClient.Bulk().IndexOp/CreateOp/UpdateOp/DeleteOp().Do(ctx)
-// 返回结构化类型，提供类型安全性
-func (c *ClientEntity) Bulk(operations []BulkOperation) (*bulk.Response, error) {
+func (c *client) Bulk(ctx context.Context, operations []BulkOperation) (*bulk.Response, error) {
+	if ctx == nil {
+		return nil, ErrContextRequired
+	}
 	if len(operations) == 0 {
-		return nil, errors.New("operations 不能为空")
+		return nil, ErrBulkOperationsRequired
 	}
 
-	bulkReq := c.typedClient.Bulk()
-
-	for _, op := range operations {
-		switch op.Action {
-		case "index":
-			indexOp := types.IndexOperation{
-				Index_: &op.Index,
-			}
-			if op.ID != "" {
-				indexOp.Id_ = &op.ID
-			}
-			if err := bulkReq.IndexOp(indexOp, op.Document); err != nil {
-				return nil, fmt.Errorf("添加 index 操作失败: %w", err)
-			}
-		case "create":
-			createOp := types.CreateOperation{
-				Index_: &op.Index,
-			}
-			if op.ID != "" {
-				createOp.Id_ = &op.ID
-			}
-			if err := bulkReq.CreateOp(createOp, op.Document); err != nil {
-				return nil, fmt.Errorf("添加 create 操作失败: %w", err)
-			}
-		case "update":
-			updateOp := types.UpdateOperation{
-				Index_: &op.Index,
-			}
-			if op.ID != "" {
-				updateOp.Id_ = &op.ID
-			}
-			updateDoc := map[string]interface{}{}
-			if op.Doc != nil {
-				updateDoc["doc"] = op.Doc
-			} else if op.Document != nil {
-				updateDoc["doc"] = op.Document
-			}
-			updateAction := &types.UpdateAction{}
-			if err := bulkReq.UpdateOp(updateOp, updateDoc, updateAction); err != nil {
-				return nil, fmt.Errorf("添加 update 操作失败: %w", err)
-			}
-		case "delete":
-			deleteOp := types.DeleteOperation{
-				Index_: &op.Index,
-			}
-			if op.ID != "" {
-				deleteOp.Id_ = &op.ID
-			}
-			if err := bulkReq.DeleteOp(deleteOp); err != nil {
-				return nil, fmt.Errorf("添加 delete 操作失败: %w", err)
-			}
-		default:
-			return nil, fmt.Errorf("不支持的操作类型: %s", op.Action)
+	req := c.typed.Bulk()
+	for _, operation := range operations {
+		if err := appendBulkOperation(req, operation); err != nil {
+			return nil, err
 		}
 	}
 
-	resp, err := bulkReq.
-		Header("Content-Type", "application/json").
-		Header("Accept", "application/json").
-		Do(context.Background())
-	if err != nil {
-		return nil, fmt.Errorf("批量操作失败: %w", err)
+	return req.Do(ctx)
+}
+
+func (c *client) Raw() *elasticsearch.TypedClient {
+	return c.typed
+}
+
+func (c *client) RawLowLevel() *elasticsearch.Client {
+	return c.raw
+}
+
+func (c *client) GetClient() *elasticsearch.TypedClient {
+	return c.Raw()
+}
+
+func (c *client) GetLowLevelClient() *elasticsearch.Client {
+	return c.RawLowLevel()
+}
+
+func prepareConfig(conf *Config) (*Config, error) {
+	if conf == nil {
+		return nil, ErrNilConfig
 	}
 
-	return resp, nil
+	cloned := *conf
+	cloned.Username = strings.TrimSpace(cloned.Username)
+	cloned.Password = strings.TrimSpace(cloned.Password)
+	cloned.APIKey = strings.TrimSpace(cloned.APIKey)
+	cloned.CloudID = strings.TrimSpace(cloned.CloudID)
+	cloned.Addresses = trimAddresses(conf.Addresses)
+	cloned.Header = cloneHeader(conf.Header)
+	cloned.CACert = append([]byte(nil), conf.CACert...)
+
+	if len(cloned.Addresses) == 0 && cloned.CloudID == "" {
+		return nil, ErrAddressRequired
+	}
+
+	if cloned.Header == nil {
+		cloned.Header = make(http.Header)
+	}
+	if cloned.Header.Get("Accept") == "" {
+		cloned.Header.Set("Accept", "application/json")
+	}
+	if cloned.Header.Get("Content-Type") == "" {
+		cloned.Header.Set("Content-Type", "application/json")
+	}
+
+	if cloned.newClient == nil {
+		cloned.newClient = elasticsearch.NewClient
+	}
+	if cloned.newTypedClient == nil {
+		cloned.newTypedClient = elasticsearch.NewTypedClient
+	}
+
+	return &cloned, nil
 }
 
-// GetClient 获取底层类型化客户端（用于高级操作）
-func (c *ClientEntity) GetClient() *elasticsearch.TypedClient {
-	return c.typedClient
+func appendBulkOperation(req *bulk.Bulk, operation BulkOperation) error {
+	indexName := strings.TrimSpace(operation.Index)
+	if indexName == "" {
+		return ErrIndexRequired
+	}
+
+	action := strings.ToLower(strings.TrimSpace(operation.Action))
+	if action == "" {
+		return ErrBulkActionRequired
+	}
+
+	switch action {
+	case "index", "create":
+		if operation.Document == nil {
+			return ErrBulkDocumentRequired
+		}
+		meta := types.IndexOperation{
+			Index_: &indexName,
+		}
+		if id := strings.TrimSpace(operation.ID); id != "" {
+			meta.Id_ = &id
+		}
+		if action == "index" {
+			return req.IndexOp(meta, operation.Document)
+		}
+		return req.CreateOp(types.CreateOperation(meta), operation.Document)
+	case "update":
+		if len(operation.Doc) == 0 {
+			return ErrBulkUpdateDocRequired
+		}
+		id := strings.TrimSpace(operation.ID)
+		if id == "" {
+			return ErrIDRequired
+		}
+		body, err := json.Marshal(operation.Doc)
+		if err != nil {
+			return fmt.Errorf("elasticsearchx: encode bulk update doc failed: %w", err)
+		}
+		return req.UpdateOp(types.UpdateOperation{
+			Index_: &indexName,
+			Id_:    &id,
+		}, nil, &types.UpdateAction{Doc: body})
+	case "delete":
+		id := strings.TrimSpace(operation.ID)
+		if id == "" {
+			return ErrIDRequired
+		}
+		return req.DeleteOp(types.DeleteOperation{
+			Index_: &indexName,
+			Id_:    &id,
+		})
+	default:
+		return fmt.Errorf("elasticsearchx: unsupported bulk action %q", operation.Action)
+	}
 }
 
-// GetLowLevelClient 获取底层低级别客户端
-func (c *ClientEntity) GetLowLevelClient() *elasticsearch.Client {
-	return c.lowLevelClient
+func trimAddresses(addresses []string) []string {
+	if len(addresses) == 0 {
+		return nil
+	}
+	trimmed := make([]string, 0, len(addresses))
+	seen := make(map[string]struct{}, len(addresses))
+	for _, address := range addresses {
+		if value := strings.TrimSpace(address); value != "" {
+			if _, ok := seen[value]; ok {
+				continue
+			}
+			seen[value] = struct{}{}
+			trimmed = append(trimmed, value)
+		}
+	}
+	return trimmed
+}
+
+func cloneHeader(header http.Header) http.Header {
+	if header == nil {
+		return nil
+	}
+	cloned := make(http.Header, len(header))
+	for key, values := range header {
+		cloned[key] = append([]string(nil), values...)
+	}
+	return cloned
+}
+
+func marshalBody(value any) ([]byte, error) {
+	return json.Marshal(value)
 }

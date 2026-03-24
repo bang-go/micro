@@ -2,118 +2,285 @@ package jwtx
 
 import (
 	"errors"
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 )
 
+const defaultExpire = 24 * time.Hour
+
 var (
-	ErrTokenExpired = errors.New("token expired")
-	ErrTokenInvalid = errors.New("token invalid")
+	ErrNilConfig            = errors.New("jwtx: config is required")
+	ErrSecretKeyRequired    = errors.New("jwtx: secret key is required")
+	ErrInvalidMethod        = errors.New("jwtx: signing method must be HMAC")
+	ErrInvalidTokenLifetime = errors.New("jwtx: invalid token lifetime")
+	ErrTokenExpired         = errors.New("jwtx: token expired")
+	ErrTokenInvalid         = errors.New("jwtx: token invalid")
 )
 
 type Config struct {
 	SecretKey string
 	Issuer    string
+	Audience  []string
 	Expire    time.Duration
+	Leeway    time.Duration
+	Method    jwt.SigningMethod
+	TimeFunc  func() time.Time
 }
 
-type JWT struct {
-	config *Config
+type JWT[T any] struct {
+	secret   []byte
+	issuer   string
+	audience []string
+	expire   time.Duration
+	method   jwt.SigningMethod
+	timeFunc func() time.Time
+	parser   *jwt.Parser
 }
 
-type Claims struct {
-	Payload interface{} `json:"payload"`
+type Claims[T any] struct {
+	Payload T `json:"payload"`
 	jwt.RegisteredClaims
 }
 
-func New(conf *Config) (*JWT, error) {
+type IssueOption func(*issueOptions)
+
+type issueOptions struct {
+	subject   string
+	audience  []string
+	id        string
+	notBefore *time.Time
+	issuedAt  *time.Time
+	expiresAt *time.Time
+}
+
+func New[T any](conf *Config) (*JWT[T], error) {
 	if conf == nil {
-		return nil, errors.New("jwtx: config is required")
-	}
-	if conf.SecretKey == "" {
-		return nil, errors.New("jwtx: secret key is required")
-	}
-	if conf.Expire == 0 {
-		conf.Expire = 24 * time.Hour
+		return nil, ErrNilConfig
 	}
 
-	return &JWT{
-		config: conf,
-	}, nil
-}
-
-func MustNew(conf *Config) *JWT {
-	j, err := New(conf)
-	if err != nil {
-		panic(err)
-	}
-	return j
-}
-
-// Generate creates a new JWT token with payload
-func (j *JWT) Generate(payload interface{}) (string, error) {
-	now := time.Now()
-	claims := Claims{
-		Payload: payload,
-		RegisteredClaims: jwt.RegisteredClaims{
-			ExpiresAt: jwt.NewNumericDate(now.Add(j.config.Expire)),
-			IssuedAt:  jwt.NewNumericDate(now),
-			NotBefore: jwt.NewNumericDate(now),
-			Issuer:    j.config.Issuer,
-		},
+	secretKey := strings.TrimSpace(conf.SecretKey)
+	if secretKey == "" {
+		return nil, ErrSecretKeyRequired
 	}
 
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	return token.SignedString([]byte(j.config.SecretKey))
-}
-
-// Parse validates the token and returns the payload
-func (j *JWT) Parse(tokenString string, payload interface{}) error {
-	token, err := jwt.ParseWithClaims(tokenString, &Claims{Payload: payload}, func(token *jwt.Token) (interface{}, error) {
-		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-			return nil, ErrTokenInvalid
-		}
-		return []byte(j.config.SecretKey), nil
-	})
-
-	if err != nil {
-		if errors.Is(err, jwt.ErrTokenExpired) {
-			return ErrTokenExpired
-		}
-		return err
-	}
-
-	if _, ok := token.Claims.(*Claims); ok && token.Valid {
-		// Note: The payload is already unmarshaled into the pointer provided to ParseWithClaims
-		// However, jwt-go behavior with interface{} payload might be tricky (it might end up as map[string]interface{})
-		// For strong typing, user should provide a struct as payload in Generate, and expect a map in Parse unless customized.
-		// A better approach for Parse generic payload:
-		// Since we can't easily unmarshal back to interface{} pointer in standard way without JSON roundtrip if it's a struct.
-		// So we recommend users to use map[string]interface{} or specific struct for Claims if they want full control.
-
-		// But here, to keep it simple:
-		// We just return success. The payload pointer passed to ParseWithClaims *should* be populated if it was possible.
-		// WARNING: If Payload is interface{}, jwt unmarshals it as map[string]interface{}.
-		return nil
-	}
-
-	return ErrTokenInvalid
-}
-
-// ParseToMap parses token and returns claims as map
-func (j *JWT) ParseToMap(tokenString string) (*Claims, error) {
-	token, err := jwt.ParseWithClaims(tokenString, &Claims{}, func(token *jwt.Token) (interface{}, error) {
-		return []byte(j.config.SecretKey), nil
-	})
-
+	method, err := normalizeMethod(conf.Method)
 	if err != nil {
 		return nil, err
 	}
 
-	if claims, ok := token.Claims.(*Claims); ok && token.Valid {
-		return claims, nil
+	expire := conf.Expire
+	if expire <= 0 {
+		expire = defaultExpire
 	}
 
-	return nil, ErrTokenInvalid
+	timeFunc := conf.TimeFunc
+	if timeFunc == nil {
+		timeFunc = time.Now
+	}
+
+	issuer := strings.TrimSpace(conf.Issuer)
+	audience := normalizeAudience(conf.Audience)
+
+	parserOptions := []jwt.ParserOption{
+		jwt.WithValidMethods([]string{method.Alg()}),
+		jwt.WithLeeway(conf.Leeway),
+		jwt.WithTimeFunc(timeFunc),
+	}
+	if issuer != "" {
+		parserOptions = append(parserOptions, jwt.WithIssuer(issuer))
+	}
+	if len(audience) > 0 {
+		parserOptions = append(parserOptions, jwt.WithAudience(audience...))
+	}
+
+	return &JWT[T]{
+		secret:   []byte(secretKey),
+		issuer:   issuer,
+		audience: audience,
+		expire:   expire,
+		method:   method,
+		timeFunc: timeFunc,
+		parser:   jwt.NewParser(parserOptions...),
+	}, nil
+}
+
+func MustNew[T any](conf *Config) *JWT[T] {
+	client, err := New[T](conf)
+	if err != nil {
+		panic(err)
+	}
+	return client
+}
+
+func (j *JWT[T]) Generate(payload T, options ...IssueOption) (string, error) {
+	now := j.timeFunc().UTC()
+	opts := issueOptions{
+		audience: append([]string(nil), j.audience...),
+	}
+	for _, option := range options {
+		if option != nil {
+			option(&opts)
+		}
+	}
+	opts.subject = strings.TrimSpace(opts.subject)
+	opts.id = strings.TrimSpace(opts.id)
+	opts.audience = normalizeAudience(opts.audience)
+
+	issuedAt := now
+	if opts.issuedAt != nil {
+		issuedAt = opts.issuedAt.UTC()
+	}
+
+	notBefore := issuedAt
+	if opts.notBefore != nil {
+		notBefore = opts.notBefore.UTC()
+	}
+
+	expiresAt := issuedAt.Add(j.expire)
+	if opts.expiresAt != nil {
+		expiresAt = opts.expiresAt.UTC()
+	}
+	if !expiresAt.After(issuedAt) || !expiresAt.After(notBefore) {
+		return "", ErrInvalidTokenLifetime
+	}
+
+	token := jwt.NewWithClaims(j.method, Claims[T]{
+		Payload: payload,
+		RegisteredClaims: jwt.RegisteredClaims{
+			Issuer:    j.issuer,
+			Subject:   opts.subject,
+			Audience:  jwt.ClaimStrings(opts.audience),
+			ID:        opts.id,
+			IssuedAt:  jwt.NewNumericDate(issuedAt),
+			NotBefore: jwt.NewNumericDate(notBefore),
+			ExpiresAt: jwt.NewNumericDate(expiresAt),
+		},
+	})
+	return token.SignedString(j.secret)
+}
+
+func (j *JWT[T]) Parse(tokenString string) (*Claims[T], error) {
+	claims := &Claims[T]{}
+	token, err := j.parser.ParseWithClaims(tokenString, claims, j.keyFunc)
+	if err != nil {
+		return nil, mapTokenError(err)
+	}
+	if !token.Valid {
+		return nil, ErrTokenInvalid
+	}
+	return claims, nil
+}
+
+func (j *JWT[T]) ParsePayload(tokenString string) (T, error) {
+	claims, err := j.Parse(tokenString)
+	if err != nil {
+		var zero T
+		return zero, err
+	}
+	return claims.Payload, nil
+}
+
+func WithSubject(subject string) IssueOption {
+	return func(opts *issueOptions) {
+		opts.subject = subject
+	}
+}
+
+func WithAudience(audience ...string) IssueOption {
+	return func(opts *issueOptions) {
+		opts.audience = normalizeAudience(audience)
+	}
+}
+
+func WithJWTID(id string) IssueOption {
+	return func(opts *issueOptions) {
+		opts.id = id
+	}
+}
+
+func WithNotBefore(at time.Time) IssueOption {
+	return func(opts *issueOptions) {
+		value := at
+		opts.notBefore = &value
+	}
+}
+
+func WithIssuedAt(at time.Time) IssueOption {
+	return func(opts *issueOptions) {
+		value := at
+		opts.issuedAt = &value
+	}
+}
+
+func WithExpiresAt(at time.Time) IssueOption {
+	return func(opts *issueOptions) {
+		value := at
+		opts.expiresAt = &value
+	}
+}
+
+func (j *JWT[T]) keyFunc(token *jwt.Token) (any, error) {
+	if token == nil || token.Method == nil || token.Method.Alg() != j.method.Alg() {
+		return nil, ErrTokenInvalid
+	}
+	return j.secret, nil
+}
+
+func mapTokenError(err error) error {
+	switch {
+	case errors.Is(err, jwt.ErrTokenExpired):
+		return fmt.Errorf("%w: %v", ErrTokenExpired, err)
+	case errors.Is(err, jwt.ErrTokenMalformed),
+		errors.Is(err, jwt.ErrTokenSignatureInvalid),
+		errors.Is(err, jwt.ErrTokenInvalidClaims),
+		errors.Is(err, jwt.ErrTokenUnverifiable),
+		errors.Is(err, jwt.ErrTokenNotValidYet):
+		return fmt.Errorf("%w: %v", ErrTokenInvalid, err)
+	default:
+		return err
+	}
+}
+
+func normalizeMethod(method jwt.SigningMethod) (jwt.SigningMethod, error) {
+	if method == nil {
+		return jwt.SigningMethodHS256, nil
+	}
+
+	switch method.Alg() {
+	case jwt.SigningMethodHS256.Alg():
+		return jwt.SigningMethodHS256, nil
+	case jwt.SigningMethodHS384.Alg():
+		return jwt.SigningMethodHS384, nil
+	case jwt.SigningMethodHS512.Alg():
+		return jwt.SigningMethodHS512, nil
+	default:
+		return nil, fmt.Errorf("%w: %s", ErrInvalidMethod, method.Alg())
+	}
+}
+
+func normalizeAudience(audience []string) []string {
+	if len(audience) == 0 {
+		return nil
+	}
+
+	normalized := make([]string, 0, len(audience))
+	seen := make(map[string]struct{}, len(audience))
+	for _, item := range audience {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		if _, ok := seen[item]; ok {
+			continue
+		}
+		seen[item] = struct{}{}
+		normalized = append(normalized, item)
+	}
+	if len(normalized) == 0 {
+		return nil
+	}
+	return normalized
 }

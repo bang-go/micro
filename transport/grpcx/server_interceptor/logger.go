@@ -6,8 +6,6 @@ import (
 
 	"github.com/bang-go/micro/telemetry/logger"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 )
 
 func UnaryServerLoggerInterceptor(l *logger.Logger, skipMethods ...string) grpc.UnaryServerInterceptor {
@@ -26,15 +24,10 @@ func UnaryServerLoggerInterceptor(l *logger.Logger, skipMethods ...string) grpc.
 		resp, err := handler(ctx, req)
 		duration := time.Since(start)
 
-		code := codes.OK
-		if err != nil {
-			code = status.Code(err)
-		}
-
 		l.Info(ctx, "grpc_access_log",
 			"kind", "server",
 			"method", info.FullMethod,
-			"code", code.String(),
+			"code", rpcStatusCode(err).String(),
 			"cost", duration.Seconds(),
 			"error", err,
 		)
@@ -59,15 +52,10 @@ func StreamServerLoggerInterceptor(l *logger.Logger, skipMethods ...string) grpc
 		err := handler(srv, stream)
 		duration := time.Since(start)
 
-		code := codes.OK
-		if err != nil {
-			code = status.Code(err)
-		}
-
-		l.Info(context.Background(), "grpc_access_log",
+		l.Info(stream.Context(), "grpc_access_log",
 			"kind", "server",
 			"method", info.FullMethod,
-			"code", code.String(),
+			"code", rpcStatusCode(err).String(),
 			"cost", duration.Seconds(),
 			"error", err,
 		)

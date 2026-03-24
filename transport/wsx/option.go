@@ -15,6 +15,7 @@ type connectOptions struct {
 	readTimeout       time.Duration
 	writeTimeout      time.Duration
 	sendBufferSize    int
+	userID            string
 	skipObservability bool
 }
 
@@ -42,7 +43,13 @@ func WithSendBufferSize(size int) opt.Option[connectOptions] {
 	})
 }
 
-func WithSkipObservability(skip bool) opt.Option[connectOptions] {
+func WithConnectUserID(userID string) opt.Option[connectOptions] {
+	return opt.OptionFunc[connectOptions](func(o *connectOptions) {
+		o.userID = userID
+	})
+}
+
+func withSkipObservability(skip bool) opt.Option[connectOptions] {
 	return opt.OptionFunc[connectOptions](func(o *connectOptions) {
 		o.skipObservability = skip
 	})
@@ -51,28 +58,16 @@ func WithSkipObservability(skip bool) opt.Option[connectOptions] {
 // ------------------- Server Options -------------------
 
 type serverOptions struct {
-	readBufferSize  int
-	writeBufferSize int
-	checkOrigin     func(r *http.Request) bool
+	checkOrigin func(r *http.Request) bool
 	// beforeUpgrade 允许在升级前进行鉴权。如果返回 error，升级将被拒绝。
 	beforeUpgrade func(r *http.Request) error
-	// onConnect 允许在连接建立后立即执行逻辑（如绑定 UserID）。如果返回 error，连接将关闭。
+	// identify 在升级前提取业务身份。返回错误会拒绝升级。
+	identify func(ctx context.Context, r *http.Request) (string, error)
+	// onConnect 允许在连接建立后立即执行副作用逻辑。如果返回 error，连接将关闭。
 	onConnect   func(ctx context.Context, c Connect, r *http.Request) error
 	path        string
 	connectOpts []opt.Option[connectOptions]
 	hub         Hub
-}
-
-func WithServerReadBufferSize(size int) opt.Option[serverOptions] {
-	return opt.OptionFunc[serverOptions](func(o *serverOptions) {
-		o.readBufferSize = size
-	})
-}
-
-func WithServerWriteBufferSize(size int) opt.Option[serverOptions] {
-	return opt.OptionFunc[serverOptions](func(o *serverOptions) {
-		o.writeBufferSize = size
-	})
 }
 
 func WithServerCheckOrigin(f func(r *http.Request) bool) opt.Option[serverOptions] {
@@ -84,6 +79,12 @@ func WithServerCheckOrigin(f func(r *http.Request) bool) opt.Option[serverOption
 func WithServerBeforeUpgrade(f func(r *http.Request) error) opt.Option[serverOptions] {
 	return opt.OptionFunc[serverOptions](func(o *serverOptions) {
 		o.beforeUpgrade = f
+	})
+}
+
+func WithServerIdentify(f func(ctx context.Context, r *http.Request) (string, error)) opt.Option[serverOptions] {
+	return opt.OptionFunc[serverOptions](func(o *serverOptions) {
+		o.identify = f
 	})
 }
 
