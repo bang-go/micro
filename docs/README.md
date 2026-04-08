@@ -43,6 +43,7 @@
 - [alipay](../contrib/pay/alipay/README.md)
 - [wechat](../contrib/pay/wechat/README.md)
 - [sms](../contrib/sms/README.md)
+- [umeng](../contrib/push/umeng/README.md)
 
 ## Runtime
 
