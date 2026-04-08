@@ -107,7 +107,7 @@ func (c *client) SendSmsWithOptions(ctx context.Context, request *SendSmsRequest
 	if err != nil {
 		return nil, err
 	}
-	return c.api.SendSmsWithContext(ctx, prepared, runtime)
+	return c.api.SendSmsWithContext(ctx, prepared, ensureRuntimeOptions(runtime))
 }
 
 func (c *client) SendBatchSms(ctx context.Context, request *SendBatchSmsRequest) (*SendBatchSmsResponse, error) {
@@ -122,7 +122,7 @@ func (c *client) SendBatchSmsWithOptions(ctx context.Context, request *SendBatch
 	if err != nil {
 		return nil, err
 	}
-	return c.api.SendBatchSmsWithContext(ctx, prepared, runtime)
+	return c.api.SendBatchSmsWithContext(ctx, prepared, ensureRuntimeOptions(runtime))
 }
 
 func (c *client) QuerySendDetails(ctx context.Context, request *QuerySendDetailsRequest) (*QuerySendDetailsResponse, error) {
@@ -137,7 +137,14 @@ func (c *client) QuerySendDetailsWithOptions(ctx context.Context, request *Query
 	if err != nil {
 		return nil, err
 	}
-	return c.api.QuerySendDetailsWithContext(ctx, prepared, runtime)
+	return c.api.QuerySendDetailsWithContext(ctx, prepared, ensureRuntimeOptions(runtime))
+}
+
+func ensureRuntimeOptions(runtime *Option) *Option {
+	if runtime != nil {
+		return runtime
+	}
+	return &Option{}
 }
 
 func prepareConfig(conf *Config) (*Config, error) {

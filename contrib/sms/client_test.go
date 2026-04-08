@@ -112,6 +112,9 @@ func TestClientOperations(t *testing.T) {
 		if fakeAPI.sendSMS.phone != "13800000000" || fakeAPI.sendSMS.template != "SMS_1" {
 			t.Fatalf("unexpected request forwarding: %+v", fakeAPI.sendSMS)
 		}
+		if fakeAPI.sendSMS.runtime == nil {
+			t.Fatal("SendSms() should supply a non-nil default runtime")
+		}
 		if got, want := util.DerefZero(request.PhoneNumbers), " 13800000000 "; got != want {
 			t.Fatalf("original request phone = %q, want %q", got, want)
 		}
@@ -162,6 +165,9 @@ func TestClientOperations(t *testing.T) {
 		if fakeAPI.batch.template != "SMS_BATCH" {
 			t.Fatalf("unexpected batch forwarding: %+v", fakeAPI.batch)
 		}
+		if fakeAPI.batch.runtime == nil {
+			t.Fatal("SendBatchSms() should supply a non-nil default runtime")
+		}
 		if got, want := util.DerefZero(request.TemplateCode), " SMS_BATCH "; got != want {
 			t.Fatalf("original batch template = %q, want %q", got, want)
 		}
@@ -191,6 +197,9 @@ func TestClientOperations(t *testing.T) {
 		if fakeAPI.query.phone != "13800000000" || fakeAPI.query.date != "20260323" {
 			t.Fatalf("unexpected query forwarding: %+v", fakeAPI.query)
 		}
+		if fakeAPI.query.runtime == nil {
+			t.Fatal("QuerySendDetails() should supply a non-nil default runtime")
+		}
 		if got, want := util.DerefZero(request.PhoneNumber), " 13800000000 "; got != want {
 			t.Fatalf("original query phone = %q, want %q", got, want)
 		}
@@ -208,10 +217,12 @@ type fakeSMSAPI struct {
 	}
 	batch struct {
 		template string
+		runtime  *Option
 	}
 	query struct {
-		phone string
-		date  string
+		phone   string
+		date    string
+		runtime *Option
 	}
 }
 
@@ -225,13 +236,15 @@ func (f *fakeSMSAPI) SendSmsWithContext(ctx context.Context, request *SendSmsReq
 	return &SendSmsResponse{}, nil
 }
 
-func (f *fakeSMSAPI) SendBatchSmsWithContext(_ context.Context, request *SendBatchSmsRequest, _ *Option) (*SendBatchSmsResponse, error) {
+func (f *fakeSMSAPI) SendBatchSmsWithContext(_ context.Context, request *SendBatchSmsRequest, runtime *Option) (*SendBatchSmsResponse, error) {
 	f.batch.template = util.DerefZero(request.TemplateCode)
+	f.batch.runtime = runtime
 	return &SendBatchSmsResponse{}, nil
 }
 
-func (f *fakeSMSAPI) QuerySendDetailsWithContext(_ context.Context, request *QuerySendDetailsRequest, _ *Option) (*QuerySendDetailsResponse, error) {
+func (f *fakeSMSAPI) QuerySendDetailsWithContext(_ context.Context, request *QuerySendDetailsRequest, runtime *Option) (*QuerySendDetailsResponse, error) {
 	f.query.phone = util.DerefZero(request.PhoneNumber)
 	f.query.date = util.DerefZero(request.SendDate)
+	f.query.runtime = runtime
 	return &QuerySendDetailsResponse{}, nil
 }
