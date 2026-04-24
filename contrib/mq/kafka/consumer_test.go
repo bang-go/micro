@@ -1,9 +1,12 @@
 package kafka
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/twmb/franz-go/pkg/kgo"
 )
 
 func TestPrepareConsumerConfigRequiresExplicitInputs(t *testing.T) {
@@ -81,4 +84,154 @@ func TestPrepareConsumerConfigKeepsExplicitPollSettings(t *testing.T) {
 	if !cfg.StartTimestamp.Equal(startTimestamp) {
 		t.Fatalf("unexpected start timestamp: %s", cfg.StartTimestamp)
 	}
+}
+
+func TestPrepareConsumerConfigRejectsIncompleteSASL(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  *ConsumerConfig
+	}{
+		{
+			name: "username only",
+			cfg: &ConsumerConfig{
+				Brokers:  []string{"localhost:9092"},
+				Topic:    "topic",
+				Group:    "group",
+				Username: "user",
+			},
+		},
+		{
+			name: "password only",
+			cfg: &ConsumerConfig{
+				Brokers:  []string{"localhost:9092"},
+				Topic:    "topic",
+				Group:    "group",
+				Password: "password",
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, _, err := prepareConsumerConfig(tt.cfg)
+			if !errors.Is(err, ErrSASLConfigInvalid) {
+				t.Fatalf("expected %v, got %v", ErrSASLConfigInvalid, err)
+			}
+		})
+	}
+}
+
+func TestConsumerStartPingsKafka(t *testing.T) {
+	fake := &fakeConsumer{}
+	consumer := newTestConsumer(t, fake)
+
+	if err := consumer.Start(context.Background()); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	if fake.pings != 1 {
+		t.Fatalf("ping count = %d, want 1", fake.pings)
+	}
+}
+
+func TestConsumerStartReturnsPingError(t *testing.T) {
+	want := errors.New("dial failed")
+	fake := &fakeConsumer{pingErr: want}
+	consumer := newTestConsumer(t, fake)
+
+	err := consumer.Start(context.Background())
+	if !errors.Is(err, want) {
+		t.Fatalf("Start() error = %v, want %v", err, want)
+	}
+}
+
+func TestConsumerPollTreatsOwnDeadlineAsEmpty(t *testing.T) {
+	fake := &fakeConsumer{fetches: kgo.NewErrFetch(context.DeadlineExceeded)}
+	consumer := newTestConsumer(t, fake)
+
+	messages, err := consumer.Poll(context.Background())
+	if err != nil {
+		t.Fatalf("Poll() error = %v", err)
+	}
+	if len(messages) != 0 {
+		t.Fatalf("message count = %d, want 0", len(messages))
+	}
+}
+
+func TestConsumerPollKeepsParentContextError(t *testing.T) {
+	fake := &fakeConsumer{fetches: kgo.NewErrFetch(context.DeadlineExceeded)}
+	consumer := newTestConsumer(t, fake)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := consumer.Poll(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Poll() error = %v, want context canceled", err)
+	}
+}
+
+func TestConsumerCloseAllowsRebalance(t *testing.T) {
+	fake := &fakeConsumer{}
+	consumer := newTestConsumer(t, fake)
+
+	if err := consumer.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if !fake.closedAllowingRebalance {
+		t.Fatal("Close() did not call CloseAllowingRebalance")
+	}
+	if fake.closed {
+		t.Fatal("Close() called Close instead of CloseAllowingRebalance")
+	}
+}
+
+func newTestConsumer(t *testing.T, fake *fakeConsumer) Consumer {
+	t.Helper()
+	consumer, err := NewConsumer(&ConsumerConfig{
+		Brokers:        []string{"localhost:9092"},
+		Topic:          "topic",
+		Group:          "group",
+		PollTimeout:    time.Millisecond,
+		DisableMetrics: true,
+		newConsumer: func(...kgo.Opt) (consumerAPI, error) {
+			return fake, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewConsumer() error = %v", err)
+	}
+	return consumer
+}
+
+type fakeConsumer struct {
+	pingErr                 error
+	fetches                 kgo.Fetches
+	commitErr               error
+	pings                   int
+	allowRebalances         int
+	closed                  bool
+	closedAllowingRebalance bool
+}
+
+func (f *fakeConsumer) Ping(context.Context) error {
+	f.pings++
+	return f.pingErr
+}
+
+func (f *fakeConsumer) PollRecords(context.Context, int) kgo.Fetches {
+	return f.fetches
+}
+
+func (f *fakeConsumer) CommitRecords(context.Context, ...*kgo.Record) error {
+	return f.commitErr
+}
+
+func (f *fakeConsumer) AllowRebalance() {
+	f.allowRebalances++
+}
+
+func (f *fakeConsumer) Close() {
+	f.closed = true
+}
+
+func (f *fakeConsumer) CloseAllowingRebalance() {
+	f.closedAllowingRebalance = true
 }

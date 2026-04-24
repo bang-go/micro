@@ -3,6 +3,7 @@ package kafka
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -19,10 +20,12 @@ const (
 )
 
 type consumerAPI interface {
+	Ping(context.Context) error
 	PollRecords(context.Context, int) kgo.Fetches
 	CommitRecords(context.Context, ...*kgo.Record) error
 	AllowRebalance()
 	Close()
+	CloseAllowingRebalance()
 }
 
 type consumerFactory func(...kgo.Opt) (consumerAPI, error)
@@ -127,6 +130,9 @@ func (c *consumerEntity) Start(ctx context.Context) error {
 	if ctx == nil {
 		return ErrContextRequired
 	}
+	if err := c.consumer.Ping(ctx); err != nil {
+		return fmt.Errorf("kafka: consumer ping failed: %w", err)
+	}
 	if c.enableLogger {
 		c.logger.Info(ctx, "kafka consumer started", "name", c.name, "topic", c.topic, "group", c.group)
 	}
@@ -158,6 +164,13 @@ func (c *consumerEntity) Poll(ctx context.Context) ([]*MessageView, error) {
 	fetches.EachRecord(func(record *kgo.Record) {
 		messages = append(messages, newMessageView(record))
 	})
+	if errors.Is(firstErr, context.DeadlineExceeded) && len(messages) == 0 {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			firstErr = ctxErr
+		} else {
+			firstErr = nil
+		}
+	}
 
 	status := receiveStatus(firstErr, len(messages))
 	duration := time.Since(startedAt)
@@ -237,7 +250,7 @@ func (c *consumerEntity) AllowRebalance() {
 }
 
 func (c *consumerEntity) Close() error {
-	c.consumer.Close()
+	c.consumer.CloseAllowingRebalance()
 	return nil
 }
 
@@ -275,6 +288,9 @@ func prepareConsumerConfig(conf *ConsumerConfig) (*ConsumerConfig, []kgo.Opt, er
 	if cloned.PollTimeout <= 0 {
 		cloned.PollTimeout = defaultPollTimeout
 	}
+	if (cloned.Username == "") != (cloned.Password == "") {
+		return nil, nil, ErrSASLConfigInvalid
+	}
 
 	opts := []kgo.Opt{
 		kgo.SeedBrokers(cloned.Brokers...),
@@ -286,7 +302,7 @@ func prepareConsumerConfig(conf *ConsumerConfig) (*ConsumerConfig, []kgo.Opt, er
 	if cloned.BlockRebalance {
 		opts = append(opts, kgo.BlockRebalanceOnPoll())
 	}
-	if cloned.Username != "" || cloned.Password != "" {
+	if cloned.Username != "" {
 		opts = append(opts, kgo.SASL(plain.Auth{User: cloned.Username, Pass: cloned.Password}.AsMechanism()))
 	}
 	if cloned.EnableTLS {
