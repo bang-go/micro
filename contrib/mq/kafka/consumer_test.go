@@ -120,26 +120,23 @@ func TestPrepareConsumerConfigRejectsIncompleteSASL(t *testing.T) {
 	}
 }
 
-func TestConsumerStartPingsKafka(t *testing.T) {
-	fake := &fakeConsumer{}
+func TestConsumerStartDoesNotProbeKafka(t *testing.T) {
+	fake := &fakeConsumer{fetches: kgo.NewErrFetch(errors.New("should not poll"))}
 	consumer := newTestConsumer(t, fake)
 
 	if err := consumer.Start(context.Background()); err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
-	if fake.pings != 1 {
-		t.Fatalf("ping count = %d, want 1", fake.pings)
+	if fake.polls != 0 {
+		t.Fatalf("poll count = %d, want 0", fake.polls)
 	}
 }
 
-func TestConsumerStartReturnsPingError(t *testing.T) {
-	want := errors.New("dial failed")
-	fake := &fakeConsumer{pingErr: want}
-	consumer := newTestConsumer(t, fake)
+func TestConsumerStartRequiresContext(t *testing.T) {
+	consumer := newTestConsumer(t, &fakeConsumer{})
 
-	err := consumer.Start(context.Background())
-	if !errors.Is(err, want) {
-		t.Fatalf("Start() error = %v, want %v", err, want)
+	if err := consumer.Start(nil); !errors.Is(err, ErrContextRequired) {
+		t.Fatalf("Start(nil) error = %v, want %v", err, ErrContextRequired)
 	}
 }
 
@@ -202,21 +199,16 @@ func newTestConsumer(t *testing.T, fake *fakeConsumer) Consumer {
 }
 
 type fakeConsumer struct {
-	pingErr                 error
 	fetches                 kgo.Fetches
 	commitErr               error
-	pings                   int
+	polls                   int
 	allowRebalances         int
 	closed                  bool
 	closedAllowingRebalance bool
 }
 
-func (f *fakeConsumer) Ping(context.Context) error {
-	f.pings++
-	return f.pingErr
-}
-
 func (f *fakeConsumer) PollRecords(context.Context, int) kgo.Fetches {
+	f.polls++
 	return f.fetches
 }
 

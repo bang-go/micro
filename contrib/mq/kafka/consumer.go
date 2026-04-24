@@ -20,7 +20,6 @@ const (
 )
 
 type consumerAPI interface {
-	Ping(context.Context) error
 	PollRecords(context.Context, int) kgo.Fetches
 	CommitRecords(context.Context, ...*kgo.Record) error
 	AllowRebalance()
@@ -130,9 +129,6 @@ func (c *consumerEntity) Start(ctx context.Context) error {
 	if ctx == nil {
 		return ErrContextRequired
 	}
-	if err := c.consumer.Ping(ctx); err != nil {
-		return fmt.Errorf("kafka: consumer ping failed: %w", err)
-	}
 	if c.enableLogger {
 		c.logger.Info(ctx, "kafka consumer started", "name", c.name, "topic", c.topic, "group", c.group)
 	}
@@ -153,12 +149,7 @@ func (c *consumerEntity) Poll(ctx context.Context) ([]*MessageView, error) {
 
 	startedAt := time.Now()
 	fetches := c.consumer.PollRecords(pollCtx, c.pollMaxRecords)
-	var firstErr error
-	fetches.EachError(func(topic string, partition int32, err error) {
-		if firstErr == nil {
-			firstErr = fmt.Errorf("kafka: fetch topic=%s partition=%d failed: %w", topic, partition, err)
-		}
-	})
+	firstErr := firstFetchError(fetches)
 
 	messages := make([]*MessageView, 0)
 	fetches.EachRecord(func(record *kgo.Record) {
@@ -335,6 +326,16 @@ func receiveStatus(err error, count int) string {
 		return "empty"
 	}
 	return "success"
+}
+
+func firstFetchError(fetches kgo.Fetches) error {
+	var firstErr error
+	fetches.EachError(func(topic string, partition int32, err error) {
+		if firstErr == nil {
+			firstErr = fmt.Errorf("kafka: fetch topic=%s partition=%d failed: %w", topic, partition, err)
+		}
+	})
+	return firstErr
 }
 
 func newMessageView(record *kgo.Record) *MessageView {
