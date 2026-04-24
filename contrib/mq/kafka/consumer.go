@@ -38,6 +38,7 @@ type ConsumerConfig struct {
 	EnableTLS         bool
 	PollMaxRecords    int
 	PollTimeout       time.Duration
+	StartTimestamp    time.Time
 	BlockRebalance    bool
 	Logger            *logger.Logger
 	EnableLogger      bool
@@ -290,6 +291,10 @@ func prepareConsumerConfig(conf *ConsumerConfig) (*ConsumerConfig, []kgo.Opt, er
 	}
 	if cloned.EnableTLS {
 		opts = append(opts, kgo.DialTLSConfig(&tls.Config{MinVersion: tls.VersionTLS12}))
+	}
+	if !cloned.StartTimestamp.IsZero() {
+		offset := kgo.NewOffset().AfterMilli(cloned.StartTimestamp.UnixMilli())
+		opts = append(opts, kgo.ConsumeStartOffset(offset), kgo.ConsumeResetOffset(offset))
 	}
 	return &cloned, opts, nil
 }

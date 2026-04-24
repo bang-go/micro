@@ -60,12 +60,14 @@ func TestPrepareConsumerConfigNormalizesValues(t *testing.T) {
 }
 
 func TestPrepareConsumerConfigKeepsExplicitPollSettings(t *testing.T) {
+	startTimestamp := time.Date(2026, 4, 24, 12, 0, 0, 0, time.UTC)
 	cfg, _, err := prepareConsumerConfig(&ConsumerConfig{
 		Brokers:        []string{"localhost:9092"},
 		Topic:          "topic",
 		Group:          "group",
 		PollMaxRecords: 7,
 		PollTimeout:    3 * time.Second,
+		StartTimestamp: startTimestamp,
 	})
 	if err != nil {
 		t.Fatalf("prepare config failed: %v", err)
@@ -75,5 +77,8 @@ func TestPrepareConsumerConfigKeepsExplicitPollSettings(t *testing.T) {
 	}
 	if cfg.PollTimeout != 3*time.Second {
 		t.Fatalf("unexpected poll timeout: %s", cfg.PollTimeout)
+	}
+	if !cfg.StartTimestamp.Equal(startTimestamp) {
+		t.Fatalf("unexpected start timestamp: %s", cfg.StartTimestamp)
 	}
 }
