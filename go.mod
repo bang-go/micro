@@ -19,6 +19,7 @@ require (
 	github.com/go-pay/gopay v1.5.115
 	github.com/golang-jwt/jwt/v5 v5.3.0
 	github.com/nacos-group/nacos-sdk-go/v2 v2.3.5
+	github.com/opensearch-project/opensearch-go/v2 v2.3.0
 	github.com/redis/go-redis/extra/redisotel/v9 v9.17.2
 	github.com/redis/go-redis/v9 v9.17.2
 	github.com/spf13/viper v1.21.0

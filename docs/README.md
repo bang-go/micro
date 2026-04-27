@@ -22,6 +22,7 @@
 - [redisx](../store/redisx/README.md)
 - [elasticsearchx](../store/elasticsearchx/README.md)
 - [opensearchx](../store/opensearchx/README.md)
+- [polarsearchx](../store/polarsearchx/README.md)
 - [ossx](../store/ossx/README.md)
 
 ## Conf
