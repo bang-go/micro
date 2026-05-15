@@ -156,3 +156,135 @@ func TestServerStartStopsWhenContextCanceled(t *testing.T) {
 		t.Fatal("server did not stop after context cancel")
 	}
 }
+
+func TestServerOnConnectRunsAfterHubRegister(t *testing.T) {
+	t.Parallel()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen failed: %v", err)
+	}
+
+	hub, err := NewHub()
+	if err != nil {
+		t.Fatalf("new hub failed: %v", err)
+	}
+	defer hub.Close()
+
+	joinedCh := make(chan struct{})
+	server := NewServer(&ServerConfig{
+		Listener:        listener,
+		ShutdownTimeout: time.Second,
+	},
+		WithServerHub(hub),
+		WithServerIdentify(func(context.Context, *http.Request) (string, error) {
+			return "user-1", nil
+		}),
+		WithServerOnConnect(func(ctx context.Context, conn Connect, _ *http.Request) error {
+			if err := hub.Join(ctx, conn.SessionID(), "room-1"); err != nil {
+				return err
+			}
+			close(joinedCh)
+			return nil
+		}),
+	)
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- server.Start(context.Background(), func(ctx context.Context, conn Connect) {
+			_, _, _ = conn.ReadMessage(ctx)
+		})
+	}()
+	t.Cleanup(func() {
+		_ = server.Shutdown(context.Background())
+		select {
+		case err := <-errCh:
+			if err != nil {
+				t.Errorf("server returned unexpected error: %v", err)
+			}
+		case <-time.After(time.Second):
+			t.Error("server did not exit during cleanup")
+		}
+	})
+
+	conn, _, err := websocket.Dial(context.Background(), "ws://"+listener.Addr().String()+"/ws", nil)
+	if err != nil {
+		t.Fatalf("dial failed: %v", err)
+	}
+	defer conn.Close(websocket.StatusNormalClosure, "done")
+
+	select {
+	case <-joinedCh:
+	case <-time.After(time.Second):
+		t.Fatal("onConnect did not join room")
+	}
+}
+
+func TestServerOnDisconnectRunsBeforeHubUnregister(t *testing.T) {
+	t.Parallel()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen failed: %v", err)
+	}
+
+	hub, err := NewHub()
+	if err != nil {
+		t.Fatalf("new hub failed: %v", err)
+	}
+	defer hub.Close()
+
+	disconnectedCh := make(chan error, 1)
+	server := NewServer(&ServerConfig{
+		Listener:        listener,
+		ShutdownTimeout: time.Second,
+	},
+		WithServerHub(hub),
+		WithServerIdentify(func(context.Context, *http.Request) (string, error) {
+			return "user-1", nil
+		}),
+		WithServerOnConnect(func(ctx context.Context, conn Connect, _ *http.Request) error {
+			return hub.Join(ctx, conn.SessionID(), "room-1")
+		}),
+		WithServerOnDisconnect(func(ctx context.Context, conn Connect, _ *http.Request) {
+			disconnectedCh <- hub.Leave(ctx, conn.SessionID(), "room-1")
+		}),
+	)
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- server.Start(context.Background(), func(ctx context.Context, conn Connect) {
+			for {
+				if _, _, err := conn.ReadMessage(ctx); err != nil {
+					return
+				}
+			}
+		})
+	}()
+	t.Cleanup(func() {
+		_ = server.Shutdown(context.Background())
+		select {
+		case err := <-errCh:
+			if err != nil {
+				t.Errorf("server returned unexpected error: %v", err)
+			}
+		case <-time.After(time.Second):
+			t.Error("server did not exit during cleanup")
+		}
+	})
+
+	conn, _, err := websocket.Dial(context.Background(), "ws://"+listener.Addr().String()+"/ws", nil)
+	if err != nil {
+		t.Fatalf("dial failed: %v", err)
+	}
+	_ = conn.Close(websocket.StatusNormalClosure, "done")
+
+	select {
+	case err := <-disconnectedCh:
+		if err != nil {
+			t.Fatalf("onDisconnect could not access registered session: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("onDisconnect did not run")
+	}
+}

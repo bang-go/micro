@@ -211,7 +211,6 @@ func WithHubMaxConcurrentSends(max int) opt.Option[hubOptions] {
 
 func (h *hubEntity) Register(c Connect) error {
 	var (
-		stale        []Connect
 		userID       string
 		userRoute    *subscriptionRoute
 		activateUser bool
@@ -228,15 +227,6 @@ func (h *hubEntity) Register(c Connect) error {
 	uid := c.UserID()
 	userID = uid
 	if uid != "" {
-		// 自动踢掉当前节点上该 UID 的旧连接 (单机挤号)
-		if oldConns, ok := h.userIndex[uid]; ok {
-			for oldC := range oldConns {
-				if oldC.SessionID() != c.SessionID() {
-					stale = append(stale, oldC)
-				}
-			}
-		}
-
 		if h.userIndex[uid] == nil {
 			h.userIndex[uid] = make(map[Connect]struct{})
 		}
@@ -256,9 +246,6 @@ func (h *hubEntity) Register(c Connect) error {
 	}
 	h.mu.Unlock()
 
-	for _, oldConn := range stale {
-		_ = oldConn.Close()
-	}
 	if userRoute != nil {
 		if activateUser {
 			if err := h.activateUserRoute(userID, userRoute); err != nil {
@@ -274,11 +261,11 @@ func (h *hubEntity) Register(c Connect) error {
 }
 
 func (h *hubEntity) Unregister(c Connect) {
+	var routeCancels []context.CancelFunc
+
 	h.mu.Lock()
 	if _, ok := h.connections[c]; ok {
 		delete(h.connections, c)
-
-		var routeCancels []context.CancelFunc
 
 		// Remove from index
 		uid := c.UserID()
@@ -325,12 +312,12 @@ func (h *hubEntity) Unregister(c Connect) {
 				}
 			}
 		}
-		h.mu.Unlock()
-		for _, cancel := range routeCancels {
-			cancel()
-		}
 	}
 	h.mu.Unlock()
+
+	for _, cancel := range routeCancels {
+		cancel()
+	}
 }
 
 func (h *hubEntity) Kick(ctx context.Context, userID string) error {

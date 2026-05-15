@@ -86,6 +86,43 @@ func TestHubLocalOperations(t *testing.T) {
 	}
 }
 
+func TestHubRegisterDoesNotKickExistingUserConnections(t *testing.T) {
+	t.Parallel()
+
+	hub, err := NewHub()
+	if err != nil {
+		t.Fatalf("new hub failed: %v", err)
+	}
+	defer hub.Close()
+
+	first := newStubConnect("user-1", "session-1")
+	second := newStubConnect("user-1", "session-2")
+
+	if err := hub.Register(first); err != nil {
+		t.Fatalf("register first failed: %v", err)
+	}
+	if err := hub.Register(second); err != nil {
+		t.Fatalf("register second failed: %v", err)
+	}
+
+	if got := first.CloseCount(); got != 0 {
+		t.Fatalf("first connection was kicked during register: %d", got)
+	}
+	if got := second.CloseCount(); got != 0 {
+		t.Fatalf("second connection was closed during register: %d", got)
+	}
+
+	if err := hub.SendTo(context.Background(), "user-1", []byte("direct")); err != nil {
+		t.Fatalf("send to user failed: %v", err)
+	}
+	if got := first.Messages(); len(got) != 1 || string(got[0]) != "direct" {
+		t.Fatalf("unexpected first messages: %q", got)
+	}
+	if got := second.Messages(); len(got) != 1 || string(got[0]) != "direct" {
+		t.Fatalf("unexpected second messages: %q", got)
+	}
+}
+
 func TestHubDistributedOperationsWaitForAck(t *testing.T) {
 	t.Parallel()
 

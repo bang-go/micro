@@ -64,10 +64,12 @@ type serverOptions struct {
 	// identify 在升级前提取业务身份。返回错误会拒绝升级。
 	identify func(ctx context.Context, r *http.Request) (string, error)
 	// onConnect 允许在连接建立后立即执行副作用逻辑。如果返回 error，连接将关闭。
-	onConnect   func(ctx context.Context, c Connect, r *http.Request) error
-	path        string
-	connectOpts []opt.Option[connectOptions]
-	hub         Hub
+	onConnect func(ctx context.Context, c Connect, r *http.Request) error
+	// onDisconnect 允许在连接结束前执行清理逻辑。返回值被忽略，调用方应自行记录失败。
+	onDisconnect func(ctx context.Context, c Connect, r *http.Request)
+	path         string
+	connectOpts  []opt.Option[connectOptions]
+	hub          Hub
 }
 
 func WithServerCheckOrigin(f func(r *http.Request) bool) opt.Option[serverOptions] {
@@ -91,6 +93,12 @@ func WithServerIdentify(f func(ctx context.Context, r *http.Request) (string, er
 func WithServerOnConnect(f func(ctx context.Context, c Connect, r *http.Request) error) opt.Option[serverOptions] {
 	return opt.OptionFunc[serverOptions](func(o *serverOptions) {
 		o.onConnect = f
+	})
+}
+
+func WithServerOnDisconnect(f func(ctx context.Context, c Connect, r *http.Request)) opt.Option[serverOptions] {
+	return opt.OptionFunc[serverOptions](func(o *serverOptions) {
+		o.onDisconnect = f
 	})
 }
 

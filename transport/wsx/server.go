@@ -314,24 +314,34 @@ func (s *serverEntity) Handler(handler func(context.Context, Connect)) http.Hand
 		s.trackConn(conn)
 		defer s.untrackConn(conn)
 
-		if s.options.onConnect != nil {
-			if err := s.options.onConnect(r.Context(), conn, r); err != nil {
-				_ = conn.Close()
-				return
-			}
-		}
-
-		// 3. Register to Hub if present
+		// Register to Hub before onConnect so callers can join rooms or route messages immediately.
 		if s.options.hub != nil {
 			if err := s.options.hub.Register(conn); err != nil {
 				_ = conn.Close()
 				return
 			}
-			defer s.options.hub.Unregister(conn)
 		}
 
-		// Ensure connection is closed when handler returns or panics
+		var disconnectOnce sync.Once
+		disconnect := func() {
+			disconnectOnce.Do(func() {
+				if s.options.onDisconnect != nil {
+					s.options.onDisconnect(r.Context(), conn, r)
+				}
+				if s.options.hub != nil {
+					s.options.hub.Unregister(conn)
+				}
+			})
+		}
+		// Ensure cleanup observes the connection while it is still open and registered.
 		defer conn.Close()
+		defer disconnect()
+
+		if s.options.onConnect != nil {
+			if err := s.options.onConnect(r.Context(), conn, r); err != nil {
+				return
+			}
+		}
 
 		handler(r.Context(), conn)
 	}
