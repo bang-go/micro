@@ -43,6 +43,20 @@ var (
 		Help: "Total number of room operations",
 	}, []string{"op"})
 
+	// Hub command acknowledgements.
+	// Label: scope = "hub" | "room", status = "success" | "error"
+	hubCommandAcks = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "ws_hub_command_ack_total",
+		Help: "Total number of distributed hub command acknowledgements",
+	}, []string{"scope", "status"})
+
+	// Redis broker internal errors that cannot be returned to a caller.
+	// Label: op = "receive" | "unsubscribe"
+	redisBrokerErrors = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "ws_redis_broker_errors_total",
+		Help: "Total number of Redis broker internal errors",
+	}, []string{"op"})
+
 	// Limit exceeded events
 	// Label: type = "max_rooms"
 	limitExceeded = prometheus.NewCounterVec(prometheus.CounterOpts{

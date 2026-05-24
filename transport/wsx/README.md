@@ -9,9 +9,11 @@
 - 关闭可收口：`Server.Shutdown(ctx)` 会主动关闭所有已升级连接，而不是只关闭 HTTP listener。
 - 分布式语义正确：`RedisBroker` 使用单一读取循环分发消息，避免多 goroutine 竞争同一个 PubSub 流。
 - 用户定向投递按用户路由：配置 broker 后，`SendTo` / `Kick` 只会发送到持有该用户连接的节点。
+- 会话定向投递按 session 路由：配置 broker 后，`SendToSession` / `KickSession` 只会发送到持有该 session 连接的节点。
 - 房间语义干净：房间成员关系是 `Session` 级别，不会把同一用户的其他设备/标签页一并加入。
 - 房间广播按房间路由：配置 broker 后，房间消息只会发送到订阅该房间的节点，而不是全节点扩散。
 - 可观测性无副作用：Prometheus 指标改为懒注册，不在包导入时污染全局注册表。
+- 内部错误可观测：无调用方返回通道的 ack 发布失败和 Redis broker 内部错误会进入指标，不静默消失。
 - 身份不可变：连接的 `UserID` 在握手阶段确定，建立后不可再变更，保证 Hub 索引一致性。
 
 ## Server
@@ -67,13 +69,15 @@ client.OnDisconnect(func(ctx context.Context, err error) {
 if err := client.Start(context.Background()); err != nil {
     panic(err)
 }
-defer client.Close()
+defer func() {
+    _ = client.Close()
+}()
 ```
 
 特性：
 
 - 首次连接失败时会按重连策略继续尝试，直到成功、超过上限或 `Start(ctx)` 超时
-- `Close()` 幂等
+- `Close()` 幂等并返回底层连接关闭错误
 - 同一个 `Client` 实例只允许启动一次，避免多重后台循环
 
 ## Hub
@@ -86,17 +90,24 @@ if err != nil {
 hub.Register(conn)
 _ = hub.Broadcast(context.Background(), []byte("hello"))
 _ = hub.SendTo(context.Background(), userID, []byte("private"))
+_ = hub.SendToSession(context.Background(), conn.SessionID(), []byte("session-private"))
+_ = hub.KickSession(context.Background(), conn.SessionID())
 _ = hub.Join(context.Background(), conn.SessionID(), roomID)
 _ = hub.BroadcastToRoom(context.Background(), roomID, []byte("room-msg"))
+_ = hub.KickRoom(context.Background(), roomID)
 ```
 
-`Hub` 默认是本地内存实现；配置 `WithHubBroker` 后，广播会走全局控制通道，单播/踢人会走用户级通道，房间广播会走房间级通道。房间成员关系仍然是本地 Session 状态，由接入该连接的节点负责维护。所有分布式/本地操作都会返回错误，不再静默吞掉失败。
+`Hub` 默认是本地内存实现；配置 `WithHubBroker` 后，广播走全局控制通道，单播/踢人走用户级通道，session 级发送/踢线走 session 级通道，房间广播/房间踢线走房间级通道。房间成员关系仍然是本地 Session 状态，由接入该连接的节点负责维护。所有分布式/本地操作都会等待目标节点执行确认并返回错误，不再静默吞掉失败；调用方未设置 deadline 时，Hub 使用默认命令超时防止无限等待。
+
+`Hub.Register` 要求连接提供非空且唯一的 `SessionID()`。重复注册或重复 session 会直接返回错误，避免覆盖 session 索引后出现不可精准踢线的隐性状态。
 
 ## Redis Broker
 
 ```go
 broker := wsx.NewRedisBroker("127.0.0.1:6379", "", 0)
-defer broker.Close()
+defer func() {
+    _ = broker.Close()
+}()
 ```
 
-`RedisBroker.Subscribe` 的订阅生命周期绑定到传入的 `context.Context`。当 `ctx.Done()` 触发时，对应 handler 会被自动移除。`Hub.Close()` 不会隐式关闭外部 broker，broker 生命周期由调用方显式管理。
+`RedisBroker.Subscribe` 的订阅生命周期绑定到传入的 `context.Context`。当 `ctx.Done()` 触发时，对应 handler 会被自动移除。`Hub.Close()` 不会隐式关闭外部 broker，broker 生命周期由调用方显式管理。`Hub.Close()` 幂等并返回底层连接关闭错误。

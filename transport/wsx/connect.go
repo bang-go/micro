@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/bang-go/opt"
@@ -72,6 +73,9 @@ type connectEntity struct {
 	closeCtx    context.Context
 	closeCancel context.CancelFunc
 	once        sync.Once
+	closing     atomic.Bool
+	closeErrMu  sync.Mutex
+	closeErr    error
 
 	skipObservability bool
 }
@@ -125,15 +129,6 @@ func (c *connectEntity) SessionID() string {
 }
 
 func (c *connectEntity) writeLoop() {
-	// Panic Recovery
-	defer func() {
-		if r := recover(); r != nil {
-			// Log panic?
-			// For now just close connection
-			c.Close()
-		}
-	}()
-
 	var ticker *time.Ticker
 	var tickerC <-chan time.Time
 	if c.heartbeatInterval > 0 {
@@ -163,7 +158,6 @@ func (c *connectEntity) writeLoop() {
 			err := c.conn.Write(wCtx, msg.typ, msg.data)
 			wCancel()
 			if err != nil {
-				// Log? Close?
 				if !c.skipObservability {
 					msgSent.WithLabelValues("error").Inc()
 				}
@@ -205,11 +199,9 @@ func (c *connectEntity) SendJSON(ctx context.Context, v interface{}) error {
 
 func (c *connectEntity) send(ctx context.Context, msg message) (err error) {
 	ctx = normalizeContext(ctx)
-	defer func() {
-		if recover() != nil {
-			err = errConnectionClosed
-		}
-	}()
+	if c.closing.Load() {
+		return errConnectionClosed
+	}
 
 	queued := msg
 	if msg.data != nil {
@@ -220,6 +212,9 @@ func (c *connectEntity) send(ctx context.Context, msg message) (err error) {
 	case <-c.closeCtx.Done():
 		return errConnectionClosed
 	case c.sendChan <- queued:
+		if c.closing.Load() {
+			return errConnectionClosed
+		}
 		return nil
 	case <-ctx.Done():
 		if !c.skipObservability {
@@ -264,12 +259,17 @@ func (c *connectEntity) ReadMessage(ctx context.Context) (websocket.MessageType,
 
 func (c *connectEntity) Close() error {
 	c.once.Do(func() {
+		c.closing.Store(true)
 		c.closeCancel()
 		close(c.closed)
-		close(c.sendChan)
-		_ = c.conn.Close(websocket.StatusNormalClosure, "closed")
+		err := c.conn.Close(websocket.StatusNormalClosure, "closed")
+		c.closeErrMu.Lock()
+		c.closeErr = err
+		c.closeErrMu.Unlock()
 	})
-	return nil
+	c.closeErrMu.Lock()
+	defer c.closeErrMu.Unlock()
+	return c.closeErr
 }
 
 func (c *connectEntity) UserID() string {

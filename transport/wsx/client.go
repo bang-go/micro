@@ -14,7 +14,7 @@ import (
 
 type Client interface {
 	Start(context.Context) error
-	Close()
+	Close() error
 	OnConnect(func(context.Context, Connect))
 	OnMessage(func(context.Context, websocket.MessageType, []byte))
 	OnDisconnect(func(context.Context, error))
@@ -39,8 +39,10 @@ type clientEntity struct {
 	runCtx           context.Context
 	runCancel        context.CancelFunc
 
-	closed    chan struct{}
-	closeOnce sync.Once
+	closed     chan struct{}
+	closeOnce  sync.Once
+	closeErrMu sync.Mutex
+	closeErr   error
 }
 
 func NewClient(addr string, opts ...opt.Option[clientOptions]) Client {
@@ -50,6 +52,9 @@ func NewClient(addr string, opts ...opt.Option[clientOptions]) Client {
 		maxReconnectAttempts: -1, // infinite
 	}
 	opt.Each(options, opts...)
+	if options.reconnectInterval <= 0 {
+		options.reconnectInterval = 2 * time.Second
+	}
 
 	return &clientEntity{
 		addr:         addr,
@@ -82,8 +87,7 @@ func (c *clientEntity) Start(ctx context.Context) error {
 	case err := <-c.firstConnect:
 		return err
 	case <-ctx.Done():
-		c.Close()
-		return ctx.Err()
+		return errors.Join(ctx.Err(), c.Close())
 	case <-c.closed:
 		return errClientClosed
 	}
@@ -134,9 +138,9 @@ func (c *clientEntity) loop(ctx context.Context) {
 		c.signalFirstConnect(nil)
 		if err := c.handleConnect(ctx, wsConn); err != nil {
 			c.clearConn(wsConn)
-			_ = wsConn.Close()
+			closeErr := wsConn.Close()
 			c.handleDisconnect(ctx, err)
-			c.Close()
+			c.appendCloseErr(closeErr, c.Close())
 			return
 		}
 
@@ -145,18 +149,18 @@ func (c *clientEntity) loop(ctx context.Context) {
 			mt, msg, err := wsConn.ReadMessage(ctx)
 			if err != nil {
 				c.clearConn(wsConn)
-				wsConn.Close()
+				closeErr := wsConn.Close()
 				if c.shouldStop() || errors.Is(err, context.Canceled) {
 					return
 				}
-				c.handleDisconnect(ctx, err)
+				c.handleDisconnect(ctx, errors.Join(err, closeErr))
 				break
 			}
 			if err := c.handleMessage(ctx, mt, msg); err != nil {
 				c.clearConn(wsConn)
-				_ = wsConn.Close()
+				closeErr := wsConn.Close()
 				c.handleDisconnect(ctx, err)
-				c.Close()
+				c.appendCloseErr(closeErr, c.Close())
 				return
 			}
 		}
@@ -172,20 +176,28 @@ func (c *clientEntity) calculateBackoff(attempt int) time.Duration {
 		return c.options.reconnectInterval
 	}
 
-	// Exponential backoff: base * 2^attempt
-	backoff := float64(c.options.reconnectInterval) * float64(int(1)<<uint(attempt))
-
-	// Max backoff: 30s
-	if backoff > float64(30*time.Second) {
-		backoff = float64(30 * time.Second)
+	backoff := c.options.reconnectInterval
+	for i := 0; i < attempt; i++ {
+		if backoff >= 30*time.Second/2 {
+			backoff = 30 * time.Second
+			break
+		}
+		backoff *= 2
+	}
+	if backoff > 30*time.Second {
+		backoff = 30 * time.Second
 	}
 
 	// Add jitter: ±20%
-	jitter := (rand.Float64()*0.4 - 0.2) * backoff
-	return time.Duration(backoff + jitter)
+	jitter := time.Duration((rand.Float64()*0.4 - 0.2) * float64(backoff))
+	delay := backoff + jitter
+	if delay > 30*time.Second {
+		return 30 * time.Second
+	}
+	return delay
 }
 
-func (c *clientEntity) Close() {
+func (c *clientEntity) Close() error {
 	c.closeOnce.Do(func() {
 		c.signalFirstConnect(errClientClosed)
 		close(c.closed)
@@ -198,9 +210,22 @@ func (c *clientEntity) Close() {
 		}
 
 		if conn := c.currentConn(); conn != nil {
-			_ = conn.Close()
+			c.appendCloseErr(conn.Close())
 		}
 	})
+	return c.currentCloseErr()
+}
+
+func (c *clientEntity) appendCloseErr(errs ...error) {
+	c.closeErrMu.Lock()
+	defer c.closeErrMu.Unlock()
+	c.closeErr = errors.Join(append([]error{c.closeErr}, errs...)...)
+}
+
+func (c *clientEntity) currentCloseErr() error {
+	c.closeErrMu.Lock()
+	defer c.closeErrMu.Unlock()
+	return c.closeErr
 }
 
 func (c *clientEntity) OnConnect(f func(context.Context, Connect)) {
@@ -298,9 +323,11 @@ func (c *clientEntity) handleDisconnect(ctx context.Context, err error) {
 	hook := c.onDisconnect
 	c.hookMu.RUnlock()
 	if hook != nil {
-		_ = invokeClientHookSafely("on_disconnect", func() {
+		if hookErr := invokeClientHookSafely("on_disconnect", func() {
 			hook(ctx, err)
-		})
+		}); hookErr != nil {
+			c.appendCloseErr(hookErr)
+		}
 	}
 }
 

@@ -115,6 +115,22 @@
     ```
 *   **含义**: 客户端接收太慢或网络拥堵，导致服务端发送缓冲区满而丢包。需重点关注。
 
+#### D. Distributed Command Ack (分布式命令确认)
+*   **Visualization**: Time Series
+*   **PromQL**:
+    ```promql
+    sum(rate(ws_hub_command_ack_total[1m])) by (scope, status)
+    ```
+*   **含义**: Hub 分布式命令的 ack 发布结果。`status="error"` 表示目标节点执行完成但 ack 发布失败，需要排查 Redis 或网络。
+
+#### E. Redis Broker Internal Errors
+*   **Visualization**: Time Series
+*   **PromQL**:
+    ```promql
+    sum(rate(ws_redis_broker_errors_total[1m])) by (op)
+    ```
+*   **含义**: Redis broker 读循环或退订中无法直接返回给调用方的内部错误。持续增长需要排查 Redis 连接稳定性。
+
 ---
 
 ## 4. 外部依赖 (Httpx Client)

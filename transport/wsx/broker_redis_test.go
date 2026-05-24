@@ -1,6 +1,11 @@
 package wsx
 
-import "testing"
+import (
+	"context"
+	"errors"
+	"testing"
+	"time"
+)
 
 func TestRedisBrokerRemoveHandlerKeepsChannelUntilLastSubscriber(t *testing.T) {
 	t.Parallel()
@@ -25,12 +30,19 @@ func TestRedisBrokerRemoveHandlerKeepsChannelUntilLastSubscriber(t *testing.T) {
 	}
 }
 
-func TestRedisBrokerInvokeHandlerSafely(t *testing.T) {
+func TestRedisBrokerRequiresClient(t *testing.T) {
 	t.Parallel()
 
-	invokeHandlerSafely(func([]byte) {
-		panic("boom")
-	}, []byte("msg"))
+	broker := NewRedisBrokerWithClient(nil)
+	if err := broker.Publish(context.Background(), "channel", []byte("msg")); !errors.Is(err, errBrokerClientMissing) {
+		t.Fatalf("expected missing client error on publish, got %v", err)
+	}
+	if _, err := broker.NumSubscribers(context.Background(), "channel"); !errors.Is(err, errBrokerClientMissing) {
+		t.Fatalf("expected missing client error on num subscribers, got %v", err)
+	}
+	if err := broker.Subscribe(context.Background(), "channel", func([]byte) {}); !errors.Is(err, errBrokerClientMissing) {
+		t.Fatalf("expected missing client error on subscribe, got %v", err)
+	}
 }
 
 func TestRedisSubscriberQueueIsBounded(t *testing.T) {
@@ -41,5 +53,22 @@ func TestRedisSubscriberQueueIsBounded(t *testing.T) {
 
 	if got := cap(subscriber.queue); got != redisSubscriberQueueSize {
 		t.Fatalf("unexpected subscriber queue capacity: %d", got)
+	}
+}
+
+func TestRedisSubscriberDoesNotDispatchAfterClose(t *testing.T) {
+	t.Parallel()
+
+	called := make(chan struct{}, 1)
+	subscriber := newRedisSubscriber(func([]byte) {
+		called <- struct{}{}
+	})
+	subscriber.close()
+	subscriber.dispatch([]byte("late"))
+
+	select {
+	case <-called:
+		t.Fatal("subscriber dispatched message after close")
+	case <-time.After(50 * time.Millisecond):
 	}
 }

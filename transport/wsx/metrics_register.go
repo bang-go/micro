@@ -16,6 +16,8 @@ func registerWSMetrics() {
 		mustRegisterCollector(&hubBroadcast, hubBroadcast)
 		mustRegisterCollector(&hubKick, hubKick)
 		mustRegisterCollector(&hubRoomOps, hubRoomOps)
+		mustRegisterCollector(&hubCommandAcks, hubCommandAcks)
+		mustRegisterCollector(&redisBrokerErrors, redisBrokerErrors)
 		mustRegisterCollector(&limitExceeded, limitExceeded)
 	})
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -54,6 +55,10 @@ func (b *RedisBroker) Subscribe(ctx context.Context, channel string, handler fun
 		b.mu.Unlock()
 		return errBrokerClosed
 	}
+	if b.client == nil {
+		b.mu.Unlock()
+		return errBrokerClientMissing
+	}
 
 	subscriber := newRedisSubscriber(handler)
 	firstHandlerForChannel := len(b.handlers[channel]) == 0
@@ -82,8 +87,7 @@ func (b *RedisBroker) Subscribe(ctx context.Context, channel string, handler fun
 			b.mu.Unlock()
 			subscriber.close()
 			b.removeHandler(channel, handlerID, false)
-			_ = pubsub.Close()
-			return err
+			return errors.Join(err, pubsub.Close())
 		}
 		go b.readLoop(pubsub)
 	}
@@ -111,6 +115,9 @@ func (b *RedisBroker) Publish(ctx context.Context, channel string, msg []byte) e
 	if closed {
 		return errBrokerClosed
 	}
+	if client == nil {
+		return errBrokerClientMissing
+	}
 	return client.Publish(ctx, channel, msg).Err()
 }
 
@@ -123,6 +130,9 @@ func (b *RedisBroker) NumSubscribers(ctx context.Context, channel string) (int64
 	b.mu.RUnlock()
 	if closed {
 		return 0, errBrokerClosed
+	}
+	if client == nil {
+		return 0, errBrokerClientMissing
 	}
 
 	result, err := client.PubSubNumSub(ctx, channel).Result()
@@ -166,6 +176,7 @@ func (b *RedisBroker) readLoop(pubsub *redis.PubSub) {
 			if b.shouldStop(pubsub) {
 				return
 			}
+			redisBrokerErrors.WithLabelValues("receive").Inc()
 			time.Sleep(100 * time.Millisecond)
 			continue
 		}
@@ -208,7 +219,9 @@ func (b *RedisBroker) removeHandler(channel string, handlerID uint64, unsubscrib
 
 	subscriber.close()
 	if unsubscribe && !closed && pubsub != nil {
-		_ = pubsub.Unsubscribe(context.Background(), channel)
+		if err := pubsub.Unsubscribe(context.Background(), channel); err != nil {
+			redisBrokerErrors.WithLabelValues("unsubscribe").Inc()
+		}
 	}
 }
 
@@ -249,21 +262,18 @@ func (b *RedisBroker) awaitSubscription(ctx context.Context, pubsub *redis.PubSu
 	return err
 }
 
-func invokeHandlerSafely(handler func([]byte), msg []byte) {
-	defer func() {
-		_ = recover()
-	}()
+func invokeHandler(handler func([]byte), msg []byte) {
 	handler(msg)
 }
 
 const redisSubscriberQueueSize = 1024
 
 type redisSubscriber struct {
-	handler  func([]byte)
-	queue    chan []byte
-	closed   chan struct{}
-	closeMu  sync.Mutex
-	isClosed bool
+	handler   func([]byte)
+	queue     chan []byte
+	closed    chan struct{}
+	closeOnce sync.Once
+	isClosed  atomic.Bool
 }
 
 func newRedisSubscriber(handler func([]byte)) *redisSubscriber {
@@ -278,29 +288,36 @@ func newRedisSubscriber(handler func([]byte)) *redisSubscriber {
 
 func (s *redisSubscriber) dispatch(msg []byte) {
 	cloned := append([]byte(nil), msg...)
-	defer func() {
-		_ = recover()
-	}()
+	if s.isClosed.Load() {
+		return
+	}
 
 	select {
 	case s.queue <- cloned:
+		if s.isClosed.Load() {
+			return
+		}
 	case <-s.closed:
 	}
 }
 
 func (s *redisSubscriber) close() {
-	s.closeMu.Lock()
-	defer s.closeMu.Unlock()
-	if s.isClosed {
-		return
-	}
-	s.isClosed = true
-	close(s.closed)
-	close(s.queue)
+	s.closeOnce.Do(func() {
+		s.isClosed.Store(true)
+		close(s.closed)
+	})
 }
 
 func (s *redisSubscriber) run() {
-	for msg := range s.queue {
-		invokeHandlerSafely(s.handler, msg)
+	for {
+		select {
+		case msg := <-s.queue:
+			if s.isClosed.Load() {
+				return
+			}
+			invokeHandler(s.handler, msg)
+		case <-s.closed:
+			return
+		}
 	}
 }

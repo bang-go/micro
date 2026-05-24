@@ -30,11 +30,17 @@ type Hub interface {
 	// SendToWithOrigin 向特定 UserID 的连接发送消息，但排除指定的 OriginID (分布式)
 	SendToWithOrigin(ctx context.Context, userID string, msg []byte, originID string) error
 
+	// SendToSession 向特定 SessionID 的连接发送消息 (分布式)
+	SendToSession(ctx context.Context, sessionID string, msg []byte) error
+
 	// Kick 强制断开特定 UserID 的所有连接 (分布式)
 	Kick(ctx context.Context, userID string) error
 
 	// KickWithOrigin 强制断开特定 UserID 的所有连接，但排除指定的 OriginID (分布式)
 	KickWithOrigin(ctx context.Context, userID string, originID string) error
+
+	// KickSession 强制断开特定 SessionID 的连接 (分布式)
+	KickSession(ctx context.Context, sessionID string) error
 
 	// Join 将特定 SessionID 加入房间。
 	// 房间成员关系是 Session 级别；配置 broker 后仅房间广播会分布式传播。
@@ -46,6 +52,9 @@ type Hub interface {
 	// BroadcastToRoom 向特定房间广播消息。
 	// 配置 broker 后消息会只发送到订阅该房间的节点。
 	BroadcastToRoom(ctx context.Context, room string, msg []byte) error
+
+	// KickRoom 强制断开特定房间内的所有连接。
+	KickRoom(ctx context.Context, room string) error
 
 	// BroadcastJSON 广播 JSON 消息 (分布式)
 	BroadcastJSON(ctx context.Context, v interface{}) error
@@ -60,7 +69,7 @@ type Hub interface {
 	Count() int64
 
 	// Close 关闭所有连接
-	Close()
+	Close() error
 }
 
 // Internal Protocol for Redis PubSub
@@ -77,8 +86,13 @@ type hubMessage struct {
 }
 
 type roomMessage struct {
+	RequestID   string            `json:"request_id,omitempty"`
+	ReplyTo     string            `json:"reply_to,omitempty"`
+	NodeID      string            `json:"node_id,omitempty"`
+	Type        string            `json:"type,omitempty"`
 	Payload     []byte            `json:"payload,omitempty"`
 	TraceHeader map[string]string `json:"trace_header,omitempty"`
+	Error       string            `json:"error,omitempty"`
 }
 
 type hubEntity struct {
@@ -88,6 +102,8 @@ type hubEntity struct {
 	userIndex map[string]map[Connect]struct{}
 	// sessionIndex maps SessionID -> Connect
 	sessionIndex map[string]Connect
+	// sessionRoutes tracks local session membership and broker subscription state.
+	sessionRoutes map[string]*subscriptionRoute
 	// userRoutes tracks local user membership count and broker subscription state.
 	userRoutes map[string]*subscriptionRoute
 	// rooms maps RoomID -> []Connect
@@ -101,10 +117,12 @@ type hubEntity struct {
 	ackChannel         string
 	maxRoomsPerConnect int
 	sendTimeout        time.Duration
+	commandTimeout     time.Duration
 	maxConcurrentSends int
 	subscribeCancel    context.CancelFunc
 	closeOnce          sync.Once
 	closed             bool
+	closeErr           error
 	pendingMu          sync.Mutex
 	pending            map[string]*pendingCommand
 }
@@ -115,6 +133,7 @@ func NewHub(opts ...opt.Option[hubOptions]) (Hub, error) {
 		nodeID:             uuid.NewString(),
 		maxRoomsPerConnect: 50,
 		sendTimeout:        100 * time.Millisecond,
+		commandTimeout:     3 * time.Second,
 		maxConcurrentSends: 50,
 	}
 	opt.Each(options, opts...)
@@ -123,6 +142,9 @@ func NewHub(opts ...opt.Option[hubOptions]) (Hub, error) {
 	}
 	if options.sendTimeout <= 0 {
 		options.sendTimeout = 100 * time.Millisecond
+	}
+	if options.commandTimeout <= 0 {
+		options.commandTimeout = 3 * time.Second
 	}
 	if options.maxConcurrentSends <= 0 {
 		options.maxConcurrentSends = 50
@@ -134,6 +156,7 @@ func NewHub(opts ...opt.Option[hubOptions]) (Hub, error) {
 		connections:        make(map[Connect]struct{}),
 		userIndex:          make(map[string]map[Connect]struct{}),
 		sessionIndex:       make(map[string]Connect),
+		sessionRoutes:      make(map[string]*subscriptionRoute),
 		userRoutes:         make(map[string]*subscriptionRoute),
 		rooms:              make(map[string]map[Connect]struct{}),
 		roomRoutes:         make(map[string]*subscriptionRoute),
@@ -143,6 +166,7 @@ func NewHub(opts ...opt.Option[hubOptions]) (Hub, error) {
 		ackChannel:         options.channel + ":ack:" + options.nodeID,
 		maxRoomsPerConnect: options.maxRoomsPerConnect,
 		sendTimeout:        options.sendTimeout,
+		commandTimeout:     options.commandTimeout,
 		maxConcurrentSends: options.maxConcurrentSends,
 		pending:            make(map[string]*pendingCommand),
 	}
@@ -170,6 +194,7 @@ type hubOptions struct {
 	nodeID             string
 	maxRoomsPerConnect int
 	sendTimeout        time.Duration
+	commandTimeout     time.Duration
 	maxConcurrentSends int
 }
 
@@ -203,6 +228,12 @@ func WithHubSendTimeout(timeout time.Duration) opt.Option[hubOptions] {
 	})
 }
 
+func WithHubCommandTimeout(timeout time.Duration) opt.Option[hubOptions] {
+	return opt.OptionFunc[hubOptions](func(o *hubOptions) {
+		o.commandTimeout = timeout
+	})
+}
+
 func WithHubMaxConcurrentSends(max int) opt.Option[hubOptions] {
 	return opt.OptionFunc[hubOptions](func(o *hubOptions) {
 		o.maxConcurrentSends = max
@@ -211,15 +242,34 @@ func WithHubMaxConcurrentSends(max int) opt.Option[hubOptions] {
 
 func (h *hubEntity) Register(c Connect) error {
 	var (
-		userID       string
-		userRoute    *subscriptionRoute
-		activateUser bool
+		userID          string
+		sessionID       string
+		userRoute       *subscriptionRoute
+		sessionRoute    *subscriptionRoute
+		activateUser    bool
+		activateSession bool
 	)
+
+	if c == nil {
+		return errHubConnectionMissing
+	}
+	sessionID = c.SessionID()
+	if err := requireSessionID(sessionID); err != nil {
+		return err
+	}
 
 	h.mu.Lock()
 	if h.closed {
 		h.mu.Unlock()
 		return errHubClosed
+	}
+	if _, registered := h.connections[c]; registered {
+		h.mu.Unlock()
+		return errHubSessionDuplicate
+	}
+	if existing := h.sessionIndex[sessionID]; existing != nil && existing != c {
+		h.mu.Unlock()
+		return errHubSessionDuplicate
 	}
 	h.connections[c] = struct{}{}
 
@@ -241,8 +291,15 @@ func (h *hubEntity) Register(c Connect) error {
 			userRoute.refs++
 		}
 	}
-	if sid := c.SessionID(); sid != "" {
-		h.sessionIndex[sid] = c
+	h.sessionIndex[sessionID] = c
+	if h.broker != nil {
+		sessionRoute = h.sessionRoutes[sessionID]
+		if sessionRoute == nil {
+			sessionRoute = newSubscriptionRoute()
+			h.sessionRoutes[sessionID] = sessionRoute
+			activateSession = true
+		}
+		sessionRoute.refs++
 	}
 	h.mu.Unlock()
 
@@ -253,6 +310,17 @@ func (h *hubEntity) Register(c Connect) error {
 				return err
 			}
 		} else if err := userRoute.wait(context.Background()); err != nil {
+			h.rollbackRegister(c)
+			return err
+		}
+	}
+	if sessionRoute != nil {
+		if activateSession {
+			if err := h.activateSessionRoute(sessionID, sessionRoute); err != nil {
+				h.rollbackRegister(c)
+				return err
+			}
+		} else if err := sessionRoute.wait(context.Background()); err != nil {
 			h.rollbackRegister(c)
 			return err
 		}
@@ -288,6 +356,17 @@ func (h *hubEntity) Unregister(c Connect) {
 		}
 		if sid := c.SessionID(); sid != "" && h.sessionIndex[sid] == c {
 			delete(h.sessionIndex, sid)
+			if route := h.sessionRoutes[sid]; route != nil {
+				if route.refs > 0 {
+					route.refs--
+				}
+				if route.refs == 0 {
+					delete(h.sessionRoutes, sid)
+					if route.cancel != nil {
+						routeCancels = append(routeCancels, route.cancel)
+					}
+				}
+			}
 		}
 
 		// Optimized removal from rooms
@@ -346,8 +425,31 @@ func (h *hubEntity) KickWithOrigin(ctx context.Context, userID string, originID 
 		return h.dispatchUserCommand(ctx, userID, hm)
 	}
 
-	// Local fallback
+	// Local dispatch.
 	return h.kickLocal(ctx, userID, originID)
+}
+
+func (h *hubEntity) KickSession(ctx context.Context, sessionID string) error {
+	ctx = normalizeContext(ctx)
+	if err := h.ensureOpen(); err != nil {
+		return err
+	}
+	if err := requireSessionID(sessionID); err != nil {
+		return err
+	}
+	hubKick.Inc()
+
+	hm := hubMessage{
+		Type:   "session_kick",
+		Target: sessionID,
+	}
+	h.injectTrace(ctx, &hm)
+
+	if h.broker != nil {
+		return h.dispatchSessionCommand(ctx, sessionID, hm)
+	}
+
+	return h.kickSessionLocal(ctx, sessionID)
 }
 
 func (h *hubEntity) Join(ctx context.Context, sessionID string, room string) error {
@@ -401,18 +503,36 @@ func (h *hubEntity) BroadcastToRoom(ctx context.Context, room string, msg []byte
 
 	if h.broker != nil {
 		rm := roomMessage{
+			Type:    "broadcast",
 			Payload: msg,
 		}
 		h.injectRoomTrace(ctx, &rm)
-		data, err := json.Marshal(rm)
-		if err != nil {
-			return err
-		}
-		return h.broker.Publish(ctx, h.roomChannel(room), data)
+		return h.dispatchRoomCommand(ctx, room, rm)
 	}
 
-	// Local fallback
+	// Local dispatch.
 	return h.broadcastToRoomLocal(ctx, room, msg)
+}
+
+func (h *hubEntity) KickRoom(ctx context.Context, room string) error {
+	ctx = normalizeContext(ctx)
+	if err := h.ensureOpen(); err != nil {
+		return err
+	}
+	if err := requireRoom(room); err != nil {
+		return err
+	}
+	hubRoomOps.WithLabelValues("kick").Inc()
+
+	if h.broker != nil {
+		rm := roomMessage{
+			Type: "kick",
+		}
+		h.injectRoomTrace(ctx, &rm)
+		return h.dispatchRoomCommand(ctx, room, rm)
+	}
+
+	return h.kickRoomLocal(ctx, room)
 }
 
 func (h *hubEntity) Broadcast(ctx context.Context, msg []byte) error {
@@ -433,12 +553,35 @@ func (h *hubEntity) Broadcast(ctx context.Context, msg []byte) error {
 		return h.dispatchDistributed(ctx, hm)
 	}
 
-	// Local fallback
+	// Local dispatch.
 	return h.broadcastLocal(ctx, msg)
 }
 
 func (h *hubEntity) SendTo(ctx context.Context, userID string, msg []byte) error {
 	return h.SendToWithOrigin(ctx, userID, msg, "")
+}
+
+func (h *hubEntity) SendToSession(ctx context.Context, sessionID string, msg []byte) error {
+	ctx = normalizeContext(ctx)
+	if err := h.ensureOpen(); err != nil {
+		return err
+	}
+	if err := requireSessionID(sessionID); err != nil {
+		return err
+	}
+
+	hm := hubMessage{
+		Type:    "session_unicast",
+		Target:  sessionID,
+		Payload: msg,
+	}
+	h.injectTrace(ctx, &hm)
+
+	if h.broker != nil {
+		return h.dispatchSessionCommand(ctx, sessionID, hm)
+	}
+
+	return h.sendToSessionLocal(ctx, sessionID, msg)
 }
 
 func (h *hubEntity) SendToWithOrigin(ctx context.Context, userID string, msg []byte, originID string) error {
@@ -462,7 +605,7 @@ func (h *hubEntity) SendToWithOrigin(ctx context.Context, userID string, msg []b
 		return h.dispatchUserCommand(ctx, userID, hm)
 	}
 
-	// Local fallback
+	// Local dispatch.
 	return h.sendToLocal(ctx, userID, msg, originID)
 }
 
@@ -532,7 +675,10 @@ func (h *hubEntity) handleUserBrokerMessage(userID string, data []byte) {
 	}
 
 	ctx := h.extractTrace(&hm)
-	_ = h.executeCommand(ctx, hm)
+	err := h.executeCommand(ctx, hm)
+	if hm.RequestID != "" && hm.ReplyTo != "" && h.broker != nil {
+		h.publishAck(ctx, hm, err)
+	}
 }
 
 func (h *hubEntity) handleRoomBrokerMessage(room string, data []byte) {
@@ -542,7 +688,22 @@ func (h *hubEntity) handleRoomBrokerMessage(room string, data []byte) {
 	}
 
 	ctx := h.extractRoomTrace(&rm)
-	_ = h.broadcastToRoomLocal(ctx, room, rm.Payload)
+	err := h.executeRoomCommand(ctx, room, rm)
+	if rm.RequestID != "" && rm.ReplyTo != "" && h.broker != nil {
+		h.publishRoomAck(ctx, rm, err)
+	}
+}
+
+func (h *hubEntity) executeRoomCommand(ctx context.Context, room string, rm roomMessage) error {
+	switch rm.Type {
+	case "", "broadcast":
+		return h.broadcastToRoomLocal(ctx, room, rm.Payload)
+	case "kick":
+		return h.kickRoomLocal(ctx, room)
+	default:
+		return fmt.Errorf("wsx: unsupported room message type %q", rm.Type)
+	}
+	return nil
 }
 
 func (h *hubEntity) executeCommand(ctx context.Context, hm hubMessage) error {
@@ -553,12 +714,19 @@ func (h *hubEntity) executeCommand(ctx context.Context, hm hubMessage) error {
 		return h.sendToLocal(ctx, hm.Target, hm.Payload, hm.OriginID)
 	case "kick":
 		return h.kickLocal(ctx, hm.Target, hm.OriginID)
+	case "session_unicast":
+		return h.sendToSessionLocal(ctx, hm.Target, hm.Payload)
+	case "session_kick":
+		return h.kickSessionLocal(ctx, hm.Target)
 	default:
 		return fmt.Errorf("wsx: unsupported hub message type %q", hm.Type)
 	}
 }
 
 func (h *hubEntity) dispatchDistributed(ctx context.Context, hm hubMessage) error {
+	ctx, cancel := h.commandContext(ctx)
+	defer cancel()
+
 	expected, err := h.broker.NumSubscribers(ctx, h.channel)
 	if err != nil {
 		return err
@@ -591,11 +759,116 @@ func (h *hubEntity) dispatchDistributed(ctx context.Context, hm hubMessage) erro
 }
 
 func (h *hubEntity) dispatchUserCommand(ctx context.Context, userID string, hm hubMessage) error {
+	ctx, cancel := h.commandContext(ctx)
+	defer cancel()
+
+	expected, err := h.broker.NumSubscribers(ctx, h.userChannel(userID))
+	if err != nil {
+		return err
+	}
+	if expected == 0 {
+		return nil
+	}
+
+	requestID := uuid.NewString()
+	pending := newPendingCommand(expected)
+
+	h.pendingMu.Lock()
+	h.pending[requestID] = pending
+	h.pendingMu.Unlock()
+	defer h.deletePending(requestID)
+
+	hm.RequestID = requestID
+	hm.ReplyTo = h.ackChannel
+	hm.NodeID = h.nodeID
+
 	data, err := json.Marshal(hm)
 	if err != nil {
 		return err
 	}
-	return h.broker.Publish(ctx, h.userChannel(userID), data)
+	if err := h.broker.Publish(ctx, h.userChannel(userID), data); err != nil {
+		return err
+	}
+
+	return pending.wait(ctx)
+}
+
+func (h *hubEntity) dispatchSessionCommand(ctx context.Context, sessionID string, hm hubMessage) error {
+	ctx, cancel := h.commandContext(ctx)
+	defer cancel()
+
+	expected, err := h.broker.NumSubscribers(ctx, h.sessionChannel(sessionID))
+	if err != nil {
+		return err
+	}
+	if expected == 0 {
+		return nil
+	}
+
+	requestID := uuid.NewString()
+	pending := newPendingCommand(expected)
+
+	h.pendingMu.Lock()
+	h.pending[requestID] = pending
+	h.pendingMu.Unlock()
+	defer h.deletePending(requestID)
+
+	hm.RequestID = requestID
+	hm.ReplyTo = h.ackChannel
+	hm.NodeID = h.nodeID
+
+	data, err := json.Marshal(hm)
+	if err != nil {
+		return err
+	}
+	if err := h.broker.Publish(ctx, h.sessionChannel(sessionID), data); err != nil {
+		return err
+	}
+
+	return pending.wait(ctx)
+}
+
+func (h *hubEntity) dispatchRoomCommand(ctx context.Context, room string, rm roomMessage) error {
+	ctx, cancel := h.commandContext(ctx)
+	defer cancel()
+
+	expected, err := h.broker.NumSubscribers(ctx, h.roomChannel(room))
+	if err != nil {
+		return err
+	}
+	if expected == 0 {
+		return nil
+	}
+
+	requestID := uuid.NewString()
+	pending := newPendingCommand(expected)
+
+	h.pendingMu.Lock()
+	h.pending[requestID] = pending
+	h.pendingMu.Unlock()
+	defer h.deletePending(requestID)
+
+	rm.RequestID = requestID
+	rm.ReplyTo = h.ackChannel
+	rm.NodeID = h.nodeID
+
+	data, err := json.Marshal(rm)
+	if err != nil {
+		return err
+	}
+	if err := h.broker.Publish(ctx, h.roomChannel(room), data); err != nil {
+		return err
+	}
+
+	return pending.wait(ctx)
+}
+
+func (h *hubEntity) commandContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	ctx = normalizeContext(ctx)
+	if _, ok := ctx.Deadline(); ok {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, h.commandTimeout)
 }
 
 func (h *hubEntity) publishAck(ctx context.Context, hm hubMessage, execErr error) {
@@ -611,9 +884,37 @@ func (h *hubEntity) publishAck(ctx context.Context, hm hubMessage, execErr error
 
 	data, err := json.Marshal(ack)
 	if err != nil {
+		hubCommandAcks.WithLabelValues("hub", "error").Inc()
 		return
 	}
-	_ = h.broker.Publish(ctx, hm.ReplyTo, data)
+	if err := h.broker.Publish(ctx, hm.ReplyTo, data); err != nil {
+		hubCommandAcks.WithLabelValues("hub", "error").Inc()
+		return
+	}
+	hubCommandAcks.WithLabelValues("hub", "success").Inc()
+}
+
+func (h *hubEntity) publishRoomAck(ctx context.Context, rm roomMessage, execErr error) {
+	ack := hubMessage{
+		Type:      "ack",
+		RequestID: rm.RequestID,
+		ReplyTo:   rm.ReplyTo,
+		NodeID:    h.nodeID,
+	}
+	if execErr != nil {
+		ack.Error = execErr.Error()
+	}
+
+	data, err := json.Marshal(ack)
+	if err != nil {
+		hubCommandAcks.WithLabelValues("room", "error").Inc()
+		return
+	}
+	if err := h.broker.Publish(ctx, rm.ReplyTo, data); err != nil {
+		hubCommandAcks.WithLabelValues("room", "error").Inc()
+		return
+	}
+	hubCommandAcks.WithLabelValues("room", "success").Inc()
 }
 
 func (h *hubEntity) deletePending(requestID string) {
@@ -685,8 +986,19 @@ func (h *hubEntity) sendToLocal(ctx context.Context, userID string, msg []byte, 
 	return h.batchSend(ctx, conns, msg)
 }
 
+func (h *hubEntity) sendToSessionLocal(ctx context.Context, sessionID string, msg []byte) error {
+	h.mu.RLock()
+	conn := h.sessionIndex[sessionID]
+	h.mu.RUnlock()
+	if conn == nil {
+		return nil
+	}
+	return h.sendWithTimeout(ctx, conn, msg)
+}
+
 func (h *hubEntity) kickLocal(ctx context.Context, userID string, originID string) error {
 	_ = ctx
+	var err error
 	h.mu.RLock()
 	targetConns := h.userIndex[userID]
 	conns := make([]Connect, 0, len(targetConns))
@@ -699,9 +1011,20 @@ func (h *hubEntity) kickLocal(ctx context.Context, userID string, originID strin
 	h.mu.RUnlock()
 
 	for _, c := range conns {
-		_ = c.Close()
+		err = errors.Join(err, c.Close())
 	}
-	return nil
+	return err
+}
+
+func (h *hubEntity) kickSessionLocal(ctx context.Context, sessionID string) error {
+	_ = ctx
+	h.mu.RLock()
+	conn := h.sessionIndex[sessionID]
+	h.mu.RUnlock()
+	if conn == nil {
+		return nil
+	}
+	return conn.Close()
 }
 
 func (h *hubEntity) broadcastToRoomLocal(ctx context.Context, room string, msg []byte) error {
@@ -714,6 +1037,23 @@ func (h *hubEntity) broadcastToRoomLocal(ctx context.Context, room string, msg [
 	h.mu.RUnlock()
 
 	return h.batchSend(ctx, conns, msg)
+}
+
+func (h *hubEntity) kickRoomLocal(ctx context.Context, room string) error {
+	_ = ctx
+	var err error
+	h.mu.RLock()
+	targetConns := h.rooms[room]
+	conns := make([]Connect, 0, len(targetConns))
+	for c := range targetConns {
+		conns = append(conns, c)
+	}
+	h.mu.RUnlock()
+
+	for _, c := range conns {
+		err = errors.Join(err, c.Close())
+	}
+	return err
 }
 
 func (h *hubEntity) joinLocal(ctx context.Context, sessionID string, room string) (*subscriptionRoute, bool, error) {
@@ -862,13 +1202,19 @@ func (h *hubEntity) Count() int64 {
 	return int64(len(h.connections))
 }
 
-func (h *hubEntity) Close() {
+func (h *hubEntity) Close() error {
 	h.closeOnce.Do(func() {
+		var closeErr error
 		h.mu.Lock()
 		h.closed = true
 		cancel := h.subscribeCancel
-		routeCancels := make([]context.CancelFunc, 0, len(h.userRoutes)+len(h.roomRoutes))
+		routeCancels := make([]context.CancelFunc, 0, len(h.userRoutes)+len(h.sessionRoutes)+len(h.roomRoutes))
 		for _, route := range h.userRoutes {
+			if route != nil && route.cancel != nil {
+				routeCancels = append(routeCancels, route.cancel)
+			}
+		}
+		for _, route := range h.sessionRoutes {
 			if route != nil && route.cancel != nil {
 				routeCancels = append(routeCancels, route.cancel)
 			}
@@ -887,6 +1233,7 @@ func (h *hubEntity) Close() {
 		h.connections = make(map[Connect]struct{})
 		h.userIndex = make(map[string]map[Connect]struct{})
 		h.sessionIndex = make(map[string]Connect)
+		h.sessionRoutes = make(map[string]*subscriptionRoute)
 		h.userRoutes = make(map[string]*subscriptionRoute)
 		h.rooms = make(map[string]map[Connect]struct{})
 		h.roomRoutes = make(map[string]*subscriptionRoute)
@@ -910,9 +1257,11 @@ func (h *hubEntity) Close() {
 			command.fail(errHubClosed)
 		}
 		for _, c := range conns {
-			_ = c.Close()
+			closeErr = errors.Join(closeErr, c.Close())
 		}
+		h.closeErr = closeErr
 	})
+	return h.closeErr
 }
 
 func (h *hubEntity) sendWithTimeout(ctx context.Context, conn Connect, msg []byte) error {
@@ -960,13 +1309,33 @@ func (h *hubEntity) activateUserRoute(userID string, route *subscriptionRoute) e
 	return err
 }
 
+func (h *hubEntity) activateSessionRoute(sessionID string, route *subscriptionRoute) error {
+	err := h.broker.Subscribe(route.ctx, h.sessionChannel(sessionID), func(data []byte) {
+		h.handleBrokerMessage(data)
+	})
+	route.err = err
+	close(route.ready)
+	return err
+}
+
 func (h *hubEntity) rollbackRegister(c Connect) {
-	var cancel context.CancelFunc
+	var cancels []context.CancelFunc
 
 	h.mu.Lock()
 	delete(h.connections, c)
 	if sid := c.SessionID(); sid != "" && h.sessionIndex[sid] == c {
 		delete(h.sessionIndex, sid)
+		if route := h.sessionRoutes[sid]; route != nil {
+			if route.refs > 0 {
+				route.refs--
+			}
+			if route.refs == 0 {
+				delete(h.sessionRoutes, sid)
+				if route.cancel != nil {
+					cancels = append(cancels, route.cancel)
+				}
+			}
+		}
 	}
 	if uid := c.UserID(); uid != "" {
 		if conns := h.userIndex[uid]; conns != nil {
@@ -981,13 +1350,15 @@ func (h *hubEntity) rollbackRegister(c Connect) {
 			}
 			if route.refs == 0 {
 				delete(h.userRoutes, uid)
-				cancel = route.cancel
+				if route.cancel != nil {
+					cancels = append(cancels, route.cancel)
+				}
 			}
 		}
 	}
 	h.mu.Unlock()
 
-	if cancel != nil {
+	for _, cancel := range cancels {
 		cancel()
 	}
 }
@@ -1003,6 +1374,10 @@ func (h *hubEntity) userChannel(userID string) string {
 	return h.channel + ":user:" + userID
 }
 
+func (h *hubEntity) sessionChannel(sessionID string) string {
+	return h.channel + ":session:" + sessionID
+}
+
 func (h *hubEntity) roomChannel(room string) string {
 	return h.channel + ":room:" + room
 }
@@ -1015,10 +1390,17 @@ func requireUserID(userID string) error {
 }
 
 func requireSessionAndRoom(sessionID string, room string) error {
+	if err := requireSessionID(sessionID); err != nil {
+		return err
+	}
+	return requireRoom(room)
+}
+
+func requireSessionID(sessionID string) error {
 	if sessionID == "" {
 		return errHubSessionIDMissing
 	}
-	return requireRoom(room)
+	return nil
 }
 
 func requireRoom(room string) error {

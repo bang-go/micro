@@ -2,6 +2,7 @@ package wsx
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/http"
 	"sync"
@@ -118,6 +119,23 @@ func TestServerShutdownClosesTrackedConnections(t *testing.T) {
 	}
 }
 
+func TestServerShutdownReturnsConnectionCloseErrors(t *testing.T) {
+	t.Parallel()
+
+	server := NewServer(&ServerConfig{}).(*serverEntity)
+	closeErr := errors.New("tracked close failed")
+	conn := newStubConnect("user-1", "session-1")
+	conn.closeErr = closeErr
+	server.trackConn(conn)
+
+	if err := server.Shutdown(context.Background()); !errors.Is(err, closeErr) {
+		t.Fatalf("expected tracked connection close error, got %v", err)
+	}
+	if got := conn.CloseCount(); got != 1 {
+		t.Fatalf("tracked connection should be closed once: %d", got)
+	}
+}
+
 func TestServerStartStopsWhenContextCanceled(t *testing.T) {
 	t.Parallel()
 
@@ -149,8 +167,8 @@ func TestServerStartStopsWhenContextCanceled(t *testing.T) {
 
 	select {
 	case err := <-startErrCh:
-		if err != nil {
-			t.Fatalf("server returned unexpected error after context cancel: %v", err)
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("server returned %v, want context canceled", err)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("server did not stop after context cancel")

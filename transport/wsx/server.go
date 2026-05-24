@@ -159,23 +159,27 @@ func (s *serverEntity) Start(ctx context.Context, handler func(context.Context, 
 	s.server = server
 	s.mu.Unlock()
 
-	serveDone := make(chan struct{})
-	defer close(serveDone)
-	go func() {
-		select {
-		case <-ctx.Done():
-			_ = s.Shutdown(context.Background())
-		case <-serveDone:
-		}
-	}()
-
 	s.info(ctx, "ws server starting", "addr", lis.Addr().String())
 
-	err = server.Serve(lis)
-	if errors.Is(err, http.ErrServerClosed) {
-		return nil
+	serveErrCh := make(chan error, 1)
+	go func() {
+		serveErrCh <- server.Serve(lis)
+	}()
+
+	select {
+	case err = <-serveErrCh:
+		if errors.Is(err, http.ErrServerClosed) {
+			return nil
+		}
+		return err
+	case <-ctx.Done():
+		shutdownErr := s.Shutdown(context.Background())
+		serveErr := <-serveErrCh
+		if errors.Is(serveErr, http.ErrServerClosed) {
+			serveErr = nil
+		}
+		return errors.Join(ctx.Err(), shutdownErr, serveErr)
 	}
-	return err
 }
 
 func (s *serverEntity) Shutdown(ctx context.Context) error {
@@ -193,15 +197,16 @@ func (s *serverEntity) Shutdown(ctx context.Context) error {
 	conns := s.snapshotConnectionsLocked()
 	s.mu.Unlock()
 
+	var connCloseErr error
 	if s.options.hub != nil {
-		s.options.hub.Close()
+		connCloseErr = errors.Join(connCloseErr, s.options.hub.Close())
 	}
 	for _, conn := range conns {
-		_ = conn.Close()
+		connCloseErr = errors.Join(connCloseErr, conn.Close())
 	}
 
 	if server == nil {
-		return nil
+		return connCloseErr
 	}
 
 	s.info(ctx, "ws server shutting down")
@@ -214,15 +219,15 @@ func (s *serverEntity) Shutdown(ctx context.Context) error {
 	select {
 	case err := <-errCh:
 		if errors.Is(err, http.ErrServerClosed) {
-			return nil
+			return connCloseErr
 		}
-		return err
+		return errors.Join(err, connCloseErr)
 	case <-ctx.Done():
 		closeErr := server.Close()
 		if errors.Is(closeErr, http.ErrServerClosed) {
 			closeErr = nil
 		}
-		return errors.Join(ctx.Err(), closeErr)
+		return errors.Join(ctx.Err(), closeErr, connCloseErr)
 	}
 }
 
@@ -249,11 +254,15 @@ func (s *serverEntity) Handler(handler func(context.Context, Connect)) http.Hand
 				)
 
 				if conn != nil {
-					_ = conn.Close()
+					if err := conn.Close(); err != nil {
+						s.config.Logger.Error(r.Context(), "[ws_close_error]", "error", err, "path", r.URL.Path)
+					}
 					return
 				}
 				if rawConn != nil {
-					_ = rawConn.Close(websocket.StatusInternalError, "internal server error")
+					if err := rawConn.Close(websocket.StatusInternalError, "internal server error"); err != nil {
+						s.config.Logger.Error(r.Context(), "[ws_raw_close_error]", "error", err, "path", r.URL.Path)
+					}
 					return
 				}
 
@@ -317,7 +326,9 @@ func (s *serverEntity) Handler(handler func(context.Context, Connect)) http.Hand
 		// Register to Hub before onConnect so callers can join rooms or route messages immediately.
 		if s.options.hub != nil {
 			if err := s.options.hub.Register(conn); err != nil {
-				_ = conn.Close()
+				if closeErr := conn.Close(); closeErr != nil {
+					s.config.Logger.Error(r.Context(), "[ws_close_error]", "error", closeErr, "path", r.URL.Path)
+				}
 				return
 			}
 		}
@@ -334,7 +345,11 @@ func (s *serverEntity) Handler(handler func(context.Context, Connect)) http.Hand
 			})
 		}
 		// Ensure cleanup observes the connection while it is still open and registered.
-		defer conn.Close()
+		defer func() {
+			if err := conn.Close(); err != nil {
+				s.config.Logger.Error(r.Context(), "[ws_close_error]", "error", err, "path", r.URL.Path)
+			}
+		}()
 		defer disconnect()
 
 		if s.options.onConnect != nil {
