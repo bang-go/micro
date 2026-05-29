@@ -34,6 +34,7 @@
 
 - [trace](../telemetry/trace/README.md)
 - [logger](../telemetry/logger/README.md)
+- [metrics](../telemetry/metrics/README.md)
 
 ## Contrib
 

@@ -45,6 +45,7 @@ Bang Micro 是一个面向生产环境的 Go 类库集，不是把所有能力�
 
 - [trace](telemetry/trace/README.md): OpenTelemetry TracerProvider 初始化与全局安装。
 - [logger](telemetry/logger/README.md): 结构化日志与 trace 上下文注入。
+- [metrics](telemetry/metrics/README.md): Prometheus 采集入口，不定义业务指标。
 
 ### Contrib
 
