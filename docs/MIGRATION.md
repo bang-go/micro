@@ -95,6 +95,12 @@ client, err := redisx.Open(ctx, &redisx.Config{
 - `Protocol` 现在只接受 `http` 或 `https`。
 - `Request` 会克隆 query / headers map，避免后续调用方修改影响已发出的请求。
 
+## store/polarsearchx
+
+- `Config.Addresses` 现在必须提供完整的 `http` 或 `https` 绝对 URL。
+- 裸 `HOST:PORT`、非法协议以及包含 userinfo、query 或 fragment 的地址会在 `New` 阶段直接返回 `ErrInvalidAddress`。
+- 阿里云控制台提供的 PolarSearch `HOST:PORT` 需要由调用方显式补充部署环境对应的协议。
+
 ## store/ossx
 
 - 所有运行时 API 都要求非 nil context。

@@ -6,7 +6,7 @@ The package keeps request bodies native to OpenSearch DSL and returns typed resp
 
 ```go
 client, err := polarsearchx.New(&polarsearchx.Config{
-    Addresses: []string{"https://your-polarsearch-endpoint"},
+    Addresses: []string{"http://your-polarsearch-endpoint:3001"},
     Username:  "user",
     Password:  "password",
     Timeout:   3 * time.Second,
@@ -23,5 +23,7 @@ resp, err := client.Search(ctx, "plaza_product_search", map[string]any{
     },
 })
 ```
+
+Every address must be an absolute `http` or `https` URL. Aliyun exposes the PolarSearch connection address as `HOST:PORT`; callers must add the protocol explicitly before constructing the client.
 
 Use `Raw` when the caller needs a PolarSearch/OpenSearch endpoint that should stay outside the wrapper's typed surface.

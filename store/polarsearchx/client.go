@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -24,6 +25,7 @@ var (
 	ErrNilConfig             = errors.New("polarsearchx: config is required")
 	ErrContextRequired       = errors.New("polarsearchx: context is required")
 	ErrAddressRequired       = errors.New("polarsearchx: at least one address is required")
+	ErrInvalidAddress        = errors.New("polarsearchx: address must be an absolute http or https URL")
 	ErrIndexRequired         = errors.New("polarsearchx: index is required")
 	ErrBodyRequired          = errors.New("polarsearchx: request body is required")
 	ErrRequestMethodRequired = errors.New("polarsearchx: request method is required")
@@ -213,7 +215,11 @@ func prepareConfig(conf *Config) (*Config, error) {
 		return nil, ErrNilConfig
 	}
 	config := *conf
-	config.Addresses = compactAddresses(config.Addresses)
+	addresses, err := normalizeAddresses(config.Addresses)
+	if err != nil {
+		return nil, err
+	}
+	config.Addresses = addresses
 	if len(config.Addresses) == 0 {
 		return nil, ErrAddressRequired
 	}
@@ -276,15 +282,26 @@ func optionalBodyReader(body any) (io.Reader, error) {
 	}
 }
 
-func compactAddresses(addresses []string) []string {
+func normalizeAddresses(addresses []string) ([]string, error) {
 	out := make([]string, 0, len(addresses))
 	for _, address := range addresses {
 		address = strings.TrimSpace(address)
-		if address != "" {
-			out = append(out, address)
+		if address == "" {
+			continue
 		}
+		parsed, err := url.Parse(address)
+		if err != nil || !parsed.IsAbs() || parsed.Host == "" {
+			return nil, fmt.Errorf("%w: %q", ErrInvalidAddress, address)
+		}
+		if parsed.Scheme != "http" && parsed.Scheme != "https" {
+			return nil, fmt.Errorf("%w: %q", ErrInvalidAddress, address)
+		}
+		if parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+			return nil, fmt.Errorf("%w: %q", ErrInvalidAddress, address)
+		}
+		out = append(out, address)
 	}
-	return out
+	return out, nil
 }
 
 func cloneHeader(header http.Header) http.Header {

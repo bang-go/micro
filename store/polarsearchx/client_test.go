@@ -21,6 +21,44 @@ func TestNewValidatesConfig(t *testing.T) {
 	if !errors.Is(err, ErrAddressRequired) {
 		t.Fatalf("expected ErrAddressRequired, got %v", err)
 	}
+
+	invalidAddresses := []string{
+		"polarsearch.example.com:3001",
+		"ftp://polarsearch.example.com:3001",
+		"http://",
+		"http://user:pass@polarsearch.example.com:3001",
+		"http://polarsearch.example.com:3001?debug=true",
+		"http://polarsearch.example.com:3001#fragment",
+	}
+	for _, address := range invalidAddresses {
+		_, err = New(&Config{Addresses: []string{address}})
+		if !errors.Is(err, ErrInvalidAddress) {
+			t.Fatalf("address %q: expected ErrInvalidAddress, got %v", address, err)
+		}
+	}
+}
+
+func TestPrepareConfigNormalizesAddresses(t *testing.T) {
+	config, err := prepareConfig(&Config{Addresses: []string{
+		" ",
+		" http://polarsearch.example.com:3001 ",
+		"https://polarsearch.example.com:443",
+	}})
+	if err != nil {
+		t.Fatalf("prepare config: %v", err)
+	}
+	want := []string{
+		"http://polarsearch.example.com:3001",
+		"https://polarsearch.example.com:443",
+	}
+	if len(config.Addresses) != len(want) {
+		t.Fatalf("addresses = %#v, want %#v", config.Addresses, want)
+	}
+	for i := range want {
+		if config.Addresses[i] != want[i] {
+			t.Fatalf("addresses[%d] = %q, want %q", i, config.Addresses[i], want[i])
+		}
+	}
 }
 
 func TestSearch(t *testing.T) {
