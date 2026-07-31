@@ -18,6 +18,14 @@ type message struct {
 	data []byte
 }
 
+type connectionTransportState uint32
+
+const (
+	connectionTransportOpen connectionTransportState = iota
+	connectionTransportClosing
+	connectionTransportTerminated
+)
+
 type Connect interface {
 	// SendText queues a text message. It returns nil if queued, error if closed.
 	// Context is used for queuing timeout if channel is full.
@@ -69,13 +77,13 @@ type connectEntity struct {
 	// Outbound channel
 	sendChan chan message
 
-	closed      chan struct{}
-	closeCtx    context.Context
-	closeCancel context.CancelFunc
-	once        sync.Once
-	closing     atomic.Bool
-	closeErrMu  sync.Mutex
-	closeErr    error
+	closed         chan struct{}
+	closeCtx       context.Context
+	closeCancel    context.CancelFunc
+	once           sync.Once
+	transportState atomic.Uint32
+	closeErrMu     sync.Mutex
+	closeErr       error
 
 	skipObservability bool
 }
@@ -161,6 +169,7 @@ func (c *connectEntity) writeLoop() {
 				if !c.skipObservability {
 					msgSent.WithLabelValues("error").Inc()
 				}
+				c.markTransportTerminated()
 				c.Close()
 				return
 			}
@@ -174,6 +183,7 @@ func (c *connectEntity) writeLoop() {
 			err := c.conn.Ping(pCtx)
 			pCancel()
 			if err != nil {
+				c.markTransportTerminated()
 				c.Close()
 				return
 			}
@@ -199,7 +209,7 @@ func (c *connectEntity) SendJSON(ctx context.Context, v interface{}) error {
 
 func (c *connectEntity) send(ctx context.Context, msg message) (err error) {
 	ctx = normalizeContext(ctx)
-	if c.closing.Load() {
+	if !c.transportIsOpen() {
 		return errConnectionClosed
 	}
 
@@ -212,7 +222,7 @@ func (c *connectEntity) send(ctx context.Context, msg message) (err error) {
 	case <-c.closeCtx.Done():
 		return errConnectionClosed
 	case c.sendChan <- queued:
-		if c.closing.Load() {
+		if !c.transportIsOpen() {
 			return errConnectionClosed
 		}
 		return nil
@@ -249,6 +259,7 @@ func (c *connectEntity) ReadMessage(ctx context.Context) (websocket.MessageType,
 
 	mt, data, err := c.conn.Read(readCtx)
 	if err != nil {
+		c.markTransportTerminated()
 		return 0, nil, err
 	}
 	if !c.skipObservability {
@@ -259,10 +270,16 @@ func (c *connectEntity) ReadMessage(ctx context.Context) (websocket.MessageType,
 
 func (c *connectEntity) Close() error {
 	c.once.Do(func() {
-		c.closing.Store(true)
-		c.closeCancel()
+		closeActiveTransport := c.transportState.CompareAndSwap(
+			uint32(connectionTransportOpen),
+			uint32(connectionTransportClosing),
+		)
 		close(c.closed)
-		err := c.conn.Close(websocket.StatusNormalClosure, "closed")
+		var err error
+		if closeActiveTransport {
+			err = c.conn.CloseNow()
+		}
+		c.closeCancel()
 		c.closeErrMu.Lock()
 		c.closeErr = err
 		c.closeErrMu.Unlock()
@@ -270,6 +287,17 @@ func (c *connectEntity) Close() error {
 	c.closeErrMu.Lock()
 	defer c.closeErrMu.Unlock()
 	return c.closeErr
+}
+
+func (c *connectEntity) markTransportTerminated() {
+	c.transportState.CompareAndSwap(
+		uint32(connectionTransportOpen),
+		uint32(connectionTransportTerminated),
+	)
+}
+
+func (c *connectEntity) transportIsOpen() bool {
+	return connectionTransportState(c.transportState.Load()) == connectionTransportOpen
 }
 
 func (c *connectEntity) UserID() string {

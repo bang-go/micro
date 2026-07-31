@@ -15,6 +15,7 @@
 - 可观测性无副作用：Prometheus 指标改为懒注册，不在包导入时污染全局注册表。
 - 内部错误可观测：无调用方返回通道的 ack 发布失败和 Redis broker 内部错误会进入指标，不静默消失。
 - 身份不可变：连接的 `UserID` 在握手阶段确定，建立后不可再变更，保证 Hub 索引一致性。
+- 关闭结果与终止原因分离：`ReadMessage` 保留 normal close、EOF、connection reset 等真实终止原因；`Connect.Close` 只报告连接资源是否完成收口，对已经终止的 transport 幂等成功。
 
 ## Server
 
@@ -100,6 +101,8 @@ _ = hub.KickRoom(context.Background(), roomID)
 `Hub` 默认是本地内存实现；配置 `WithHubBroker` 后，广播走全局控制通道，单播/踢人走用户级通道，session 级发送/踢线走 session 级通道，房间广播/房间踢线走房间级通道。房间成员关系仍然是本地 Session 状态，由接入该连接的节点负责维护。所有分布式/本地操作都会等待目标节点执行确认并返回错误，不再静默吞掉失败；调用方未设置 deadline 时，Hub 使用默认命令超时防止无限等待。
 
 `Hub.Register` 要求连接提供非空且唯一的 `SessionID()`。重复注册或重复 session 会直接返回错误，避免覆盖 session 索引后出现不可精准踢线的隐性状态。
+
+服务端 `Connect.Close()` 是幂等、非协商式的资源收口操作：活动 transport 会立即关闭，不等待对端参与关闭握手，保证 Hub Kick 与 Server Shutdown 不受对端读取状态影响；已经由读、写或心跳链路判定终止的 transport 只执行 wsx 本地清理。对端先关闭不是 `Close()` 失败，原始终止原因仍由 `ReadMessage` 返回，调用方不得用 `Close()` 的 nil 结果反推连接此前属于 normal closure。需要主动发送 normal close frame 的客户端应在自己的连接生命周期内完成该动作。
 
 ## Redis Broker
 
