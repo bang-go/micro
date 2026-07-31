@@ -9,87 +9,44 @@ import (
 	"time"
 
 	"github.com/bang-go/opt"
+	"github.com/coder/websocket"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/propagation"
 )
 
-// Hub 管理所有活跃连接，支持广播和单播
 type Hub interface {
-	// Register 注册连接
-	Register(Connect) error
-	// Unregister 注销连接
-	Unregister(Connect)
-
-	// Broadcast 广播消息给所有连接 (分布式)
-	Broadcast(ctx context.Context, msg []byte) error
-
-	// SendTo 向特定 UserID 的连接发送消息 (分布式)
-	SendTo(ctx context.Context, userID string, msg []byte) error
-
-	// SendToWithOrigin 向特定 UserID 的连接发送消息，但排除指定的 OriginID (分布式)
-	SendToWithOrigin(ctx context.Context, userID string, msg []byte, originID string) error
-
-	// SendToSession 向特定 SessionID 的连接发送消息 (分布式)
-	SendToSession(ctx context.Context, sessionID string, msg []byte) error
-
-	// Kick 强制断开特定 UserID 的所有连接 (分布式)
-	Kick(ctx context.Context, userID string) error
-
-	// KickWithOrigin 强制断开特定 UserID 的所有连接，但排除指定的 OriginID (分布式)
-	KickWithOrigin(ctx context.Context, userID string, originID string) error
-
-	// KickSession 强制断开特定 SessionID 的连接 (分布式)
-	KickSession(ctx context.Context, sessionID string) error
-
-	// Join 将特定 SessionID 加入房间。
-	// 房间成员关系是 Session 级别；配置 broker 后仅房间广播会分布式传播。
-	Join(ctx context.Context, sessionID string, room string) error
-
-	// Leave 将特定 SessionID 移出房间。
-	Leave(ctx context.Context, sessionID string, room string) error
-
-	// BroadcastToRoom 向特定房间广播消息。
-	// 配置 broker 后消息会只发送到订阅该房间的节点。
-	BroadcastToRoom(ctx context.Context, room string, msg []byte) error
-
-	// KickRoom 强制断开特定房间内的所有连接。
-	KickRoom(ctx context.Context, room string) error
-
-	// BroadcastJSON 广播 JSON 消息 (分布式)
-	BroadcastJSON(ctx context.Context, v interface{}) error
-
-	// SendJSONTo 向特定用户发送 JSON 消息 (分布式)
-	SendJSONTo(ctx context.Context, userID string, v interface{}) error
-
-	// SendJSONToWithOrigin 向特定用户发送 JSON 消息，但排除指定的 OriginID (分布式)
-	SendJSONToWithOrigin(ctx context.Context, userID string, v interface{}, originID string) error
-
-	// Count 返回当前在线连接数 (本地)
-	Count() int64
-
-	// Close 关闭所有连接
-	Close() error
+	Register(context.Context, Connect) error
+	Unregister(context.Context, Connect) error
+	Broadcast(context.Context, []byte) error
+	SendToUser(context.Context, string, []byte) error
+	BroadcastToRoom(context.Context, string, []byte) error
+	DisconnectUser(context.Context, string, []byte) error
+	DisconnectRoom(context.Context, string, []byte) error
+	JoinSessionToRoom(context.Context, string, string) error
+	JoinUserToRoom(context.Context, string, string) error
+	LeaveUserFromRoom(context.Context, string, string) error
+	start(context.Context) error
+	shutdown(context.Context) error
 }
 
-// Internal Protocol for Redis PubSub
-type hubMessage struct {
-	Type        string            `json:"type"` // "broadcast", "unicast", "kick"
+const (
+	commandBroadcast      = "broadcast"
+	commandSendUser       = "send_user"
+	commandDisconnectUser = "disconnect_user"
+	commandJoinUserRoom   = "join_user_room"
+	commandLeaveUserRoom  = "leave_user_room"
+	commandBroadcastRoom  = "broadcast_room"
+	commandDisconnectRoom = "disconnect_room"
+)
+
+type brokerCommand struct {
+	Type        string            `json:"type"`
 	RequestID   string            `json:"request_id,omitempty"`
 	ReplyTo     string            `json:"reply_to,omitempty"`
 	NodeID      string            `json:"node_id,omitempty"`
-	Target      string            `json:"target,omitempty"` // UserID for unicast/kick
-	Payload     []byte            `json:"payload,omitempty"`
-	TraceHeader map[string]string `json:"trace_header,omitempty"` // Trace propagation
-	OriginID    string            `json:"origin_id,omitempty"`    // To avoid self-kicking
-	Error       string            `json:"error,omitempty"`
-}
-
-type roomMessage struct {
-	RequestID   string            `json:"request_id,omitempty"`
-	ReplyTo     string            `json:"reply_to,omitempty"`
-	NodeID      string            `json:"node_id,omitempty"`
-	Type        string            `json:"type,omitempty"`
+	Target      string            `json:"target,omitempty"`
+	Room        string            `json:"room,omitempty"`
 	Payload     []byte            `json:"payload,omitempty"`
 	TraceHeader map[string]string `json:"trace_header,omitempty"`
 	Error       string            `json:"error,omitempty"`
@@ -97,1342 +54,727 @@ type roomMessage struct {
 
 type hubEntity struct {
 	mu          sync.RWMutex
+	started     bool
+	closed      bool
 	connections map[Connect]struct{}
-	// userIndex maps UserID -> []Connect (one user might have multiple devices)
-	userIndex map[string]map[Connect]struct{}
-	// sessionIndex maps SessionID -> Connect
-	sessionIndex map[string]Connect
-	// sessionRoutes tracks local session membership and broker subscription state.
-	sessionRoutes map[string]*subscriptionRoute
-	// userRoutes tracks local user membership count and broker subscription state.
-	userRoutes map[string]*subscriptionRoute
-	// rooms maps RoomID -> []Connect
-	rooms map[string]map[Connect]struct{}
-	// roomRoutes tracks local room membership count and broker subscription state.
-	roomRoutes map[string]*subscriptionRoute
+	userIndex   map[string]map[Connect]struct{}
+	sessions    map[string]Connect
+	rooms       map[string]map[Connect]struct{}
+	userRoutes  map[string]*subscriptionRoute
+	roomRoutes  map[string]*subscriptionRoute
 
 	broker             MessageBroker
 	channel            string
 	nodeID             string
 	ackChannel         string
 	maxRoomsPerConnect int
-	sendTimeout        time.Duration
 	commandTimeout     time.Duration
 	maxConcurrentSends int
-	subscribeCancel    context.CancelFunc
-	closeOnce          sync.Once
-	closed             bool
-	closeErr           error
-	pendingMu          sync.Mutex
-	pending            map[string]*pendingCommand
+	globalSubscription Subscription
+	ackSubscription    Subscription
+
+	pendingMu sync.Mutex
+	pending   map[string]*pendingCommand
+
+	shutdownMu  sync.Mutex
+	shutdownErr error
 }
 
-func NewHub(opts ...opt.Option[hubOptions]) (Hub, error) {
+func NewHub(broker MessageBroker, opts ...opt.Option[hubOptions]) (Hub, error) {
 	options := &hubOptions{
 		channel:            "ws:global",
 		nodeID:             uuid.NewString(),
 		maxRoomsPerConnect: 50,
-		sendTimeout:        100 * time.Millisecond,
 		commandTimeout:     3 * time.Second,
 		maxConcurrentSends: 50,
 	}
 	opt.Each(options, opts...)
-	if options.maxRoomsPerConnect <= 0 {
-		options.maxRoomsPerConnect = 50
+	if options.channel == "" {
+		return nil, fmt.Errorf("wsx: hub channel is required")
 	}
-	if options.sendTimeout <= 0 {
-		options.sendTimeout = 100 * time.Millisecond
+	if options.nodeID == "" {
+		return nil, fmt.Errorf("wsx: hub node id is required")
 	}
-	if options.commandTimeout <= 0 {
-		options.commandTimeout = 3 * time.Second
+	if options.maxRoomsPerConnect <= 0 || options.commandTimeout <= 0 || options.maxConcurrentSends <= 0 {
+		return nil, fmt.Errorf("wsx: hub limits and timeouts must be positive")
 	}
-	if options.maxConcurrentSends <= 0 {
-		options.maxConcurrentSends = 50
-	}
-
 	registerWSMetrics()
-
-	h := &hubEntity{
+	return &hubEntity{
 		connections:        make(map[Connect]struct{}),
 		userIndex:          make(map[string]map[Connect]struct{}),
-		sessionIndex:       make(map[string]Connect),
-		sessionRoutes:      make(map[string]*subscriptionRoute),
-		userRoutes:         make(map[string]*subscriptionRoute),
+		sessions:           make(map[string]Connect),
 		rooms:              make(map[string]map[Connect]struct{}),
+		userRoutes:         make(map[string]*subscriptionRoute),
 		roomRoutes:         make(map[string]*subscriptionRoute),
-		broker:             options.broker,
+		broker:             broker,
 		channel:            options.channel,
 		nodeID:             options.nodeID,
 		ackChannel:         options.channel + ":ack:" + options.nodeID,
 		maxRoomsPerConnect: options.maxRoomsPerConnect,
-		sendTimeout:        options.sendTimeout,
 		commandTimeout:     options.commandTimeout,
 		maxConcurrentSends: options.maxConcurrentSends,
 		pending:            make(map[string]*pendingCommand),
-	}
-
-	if h.broker != nil {
-		subscribeCtx, cancel := context.WithCancel(context.Background())
-		if err := h.broker.Subscribe(subscribeCtx, h.channel, h.handleBrokerMessage); err != nil {
-			cancel()
-			return nil, err
-		}
-		if err := h.broker.Subscribe(subscribeCtx, h.ackChannel, h.handleAckMessage); err != nil {
-			cancel()
-			return nil, err
-		}
-		h.subscribeCancel = cancel
-	}
-
-	return h, nil
+	}, nil
 }
 
-// hubOptions and Option helpers
-type hubOptions struct {
-	broker             MessageBroker
-	channel            string
-	nodeID             string
-	maxRoomsPerConnect int
-	sendTimeout        time.Duration
-	commandTimeout     time.Duration
-	maxConcurrentSends int
-}
-
-func WithHubBroker(broker MessageBroker) opt.Option[hubOptions] {
-	return opt.OptionFunc[hubOptions](func(o *hubOptions) {
-		o.broker = broker
-	})
-}
-
-func WithHubChannel(channel string) opt.Option[hubOptions] {
-	return opt.OptionFunc[hubOptions](func(o *hubOptions) {
-		o.channel = channel
-	})
-}
-
-func WithHubNodeID(nodeID string) opt.Option[hubOptions] {
-	return opt.OptionFunc[hubOptions](func(o *hubOptions) {
-		o.nodeID = nodeID
-	})
-}
-
-func WithHubMaxRoomsPerConnect(max int) opt.Option[hubOptions] {
-	return opt.OptionFunc[hubOptions](func(o *hubOptions) {
-		o.maxRoomsPerConnect = max
-	})
-}
-
-func WithHubSendTimeout(timeout time.Duration) opt.Option[hubOptions] {
-	return opt.OptionFunc[hubOptions](func(o *hubOptions) {
-		o.sendTimeout = timeout
-	})
-}
-
-func WithHubCommandTimeout(timeout time.Duration) opt.Option[hubOptions] {
-	return opt.OptionFunc[hubOptions](func(o *hubOptions) {
-		o.commandTimeout = timeout
-	})
-}
-
-func WithHubMaxConcurrentSends(max int) opt.Option[hubOptions] {
-	return opt.OptionFunc[hubOptions](func(o *hubOptions) {
-		o.maxConcurrentSends = max
-	})
-}
-
-func (h *hubEntity) Register(c Connect) error {
-	var (
-		userID          string
-		sessionID       string
-		userRoute       *subscriptionRoute
-		sessionRoute    *subscriptionRoute
-		activateUser    bool
-		activateSession bool
-	)
-
-	if c == nil {
-		return errHubConnectionMissing
-	}
-	sessionID = c.SessionID()
-	if err := requireSessionID(sessionID); err != nil {
+func (h *hubEntity) start(ctx context.Context) error {
+	if err := validateContext(ctx); err != nil {
 		return err
 	}
-
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	h.mu.Lock()
 	if h.closed {
 		h.mu.Unlock()
-		return errHubClosed
+		return ErrHubClosed
 	}
-	if _, registered := h.connections[c]; registered {
+	if h.started {
 		h.mu.Unlock()
-		return errHubSessionDuplicate
-	}
-	if existing := h.sessionIndex[sessionID]; existing != nil && existing != c {
-		h.mu.Unlock()
-		return errHubSessionDuplicate
-	}
-	h.connections[c] = struct{}{}
-
-	// Index by UserID if present
-	uid := c.UserID()
-	userID = uid
-	if uid != "" {
-		if h.userIndex[uid] == nil {
-			h.userIndex[uid] = make(map[Connect]struct{})
-		}
-		h.userIndex[uid][c] = struct{}{}
-		if h.broker != nil {
-			userRoute = h.userRoutes[uid]
-			if userRoute == nil {
-				userRoute = newSubscriptionRoute()
-				h.userRoutes[uid] = userRoute
-				activateUser = true
-			}
-			userRoute.refs++
-		}
-	}
-	h.sessionIndex[sessionID] = c
-	if h.broker != nil {
-		sessionRoute = h.sessionRoutes[sessionID]
-		if sessionRoute == nil {
-			sessionRoute = newSubscriptionRoute()
-			h.sessionRoutes[sessionID] = sessionRoute
-			activateSession = true
-		}
-		sessionRoute.refs++
+		return nil
 	}
 	h.mu.Unlock()
 
-	if userRoute != nil {
-		if activateUser {
-			if err := h.activateUserRoute(userID, userRoute); err != nil {
-				h.rollbackRegister(c)
-				return err
-			}
-		} else if err := userRoute.wait(context.Background()); err != nil {
-			h.rollbackRegister(c)
+	if h.broker != nil {
+		global, err := h.broker.Subscribe(ctx, h.channel, h.handleCommand)
+		if err != nil {
 			return err
 		}
-	}
-	if sessionRoute != nil {
-		if activateSession {
-			if err := h.activateSessionRoute(sessionID, sessionRoute); err != nil {
-				h.rollbackRegister(c)
-				return err
-			}
-		} else if err := sessionRoute.wait(context.Background()); err != nil {
-			h.rollbackRegister(c)
-			return err
+		ack, err := h.broker.Subscribe(ctx, h.ackChannel, h.handleAck)
+		if err != nil {
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), h.commandTimeout)
+			cleanupErr := global.Close(cleanupCtx)
+			cancel()
+			return errors.Join(err, cleanupErr)
 		}
+		h.mu.Lock()
+		h.globalSubscription = global
+		h.ackSubscription = ack
+		h.mu.Unlock()
 	}
+	h.mu.Lock()
+	h.started = true
+	h.mu.Unlock()
 	return nil
 }
 
-func (h *hubEntity) Unregister(c Connect) {
-	var routeCancels []context.CancelFunc
+func (h *hubEntity) Register(ctx context.Context, conn Connect) error {
+	if err := validateContext(ctx); err != nil {
+		return err
+	}
+	if conn == nil {
+		return ErrConnectionRequired
+	}
+	if err := requireSessionID(conn.SessionID()); err != nil {
+		return err
+	}
 
+	var route *subscriptionRoute
+	var createRoute bool
 	h.mu.Lock()
-	if _, ok := h.connections[c]; ok {
-		delete(h.connections, c)
-
-		// Remove from index
-		uid := c.UserID()
-		if uid != "" && h.userIndex[uid] != nil {
-			delete(h.userIndex[uid], c)
-			if len(h.userIndex[uid]) == 0 {
-				delete(h.userIndex, uid)
-			}
-			if route := h.userRoutes[uid]; route != nil {
-				if route.refs > 0 {
-					route.refs--
-				}
-				if route.refs == 0 {
-					delete(h.userRoutes, uid)
-					if route.cancel != nil {
-						routeCancels = append(routeCancels, route.cancel)
-					}
-				}
-			}
+	if err := h.ensureRunningLocked(); err != nil {
+		h.mu.Unlock()
+		return err
+	}
+	if _, exists := h.connections[conn]; exists || h.sessions[conn.SessionID()] != nil {
+		h.mu.Unlock()
+		return ErrSessionDuplicate
+	}
+	h.connections[conn] = struct{}{}
+	h.sessions[conn.SessionID()] = conn
+	if userID := conn.UserID(); userID != "" {
+		if h.userIndex[userID] == nil {
+			h.userIndex[userID] = make(map[Connect]struct{})
 		}
-		if sid := c.SessionID(); sid != "" && h.sessionIndex[sid] == c {
-			delete(h.sessionIndex, sid)
-			if route := h.sessionRoutes[sid]; route != nil {
-				if route.refs > 0 {
-					route.refs--
-				}
-				if route.refs == 0 {
-					delete(h.sessionRoutes, sid)
-					if route.cancel != nil {
-						routeCancels = append(routeCancels, route.cancel)
-					}
-				}
+		h.userIndex[userID][conn] = struct{}{}
+		if h.broker != nil {
+			route = h.userRoutes[userID]
+			if route == nil {
+				route = newSubscriptionRoute()
+				h.userRoutes[userID] = route
+				createRoute = true
 			}
-		}
-
-		// Optimized removal from rooms
-		if member, ok := c.(roomMember); ok {
-			for _, room := range member.rooms() {
-				if conns, ok := h.rooms[room]; ok {
-					delete(conns, c)
-					if len(conns) == 0 {
-						delete(h.rooms, room)
-					}
-				}
-				if route := h.roomRoutes[room]; route != nil {
-					if route.refs > 0 {
-						route.refs--
-					}
-					if route.refs == 0 {
-						delete(h.roomRoutes, room)
-						if route.cancel != nil {
-							routeCancels = append(routeCancels, route.cancel)
-						}
-					}
-				}
-			}
+			route.refs++
 		}
 	}
 	h.mu.Unlock()
 
-	for _, cancel := range routeCancels {
-		cancel()
+	if route == nil {
+		return nil
 	}
-}
-
-func (h *hubEntity) Kick(ctx context.Context, userID string) error {
-	return h.KickWithOrigin(ctx, userID, "")
-}
-
-func (h *hubEntity) KickWithOrigin(ctx context.Context, userID string, originID string) error {
-	ctx = normalizeContext(ctx)
-	if err := h.ensureOpen(); err != nil {
-		return err
-	}
-	if err := requireUserID(userID); err != nil {
-		return err
-	}
-	hubKick.Inc()
-
-	// Wrap in protocol
-	hm := hubMessage{
-		Type:     "kick",
-		Target:   userID,
-		OriginID: originID,
-	}
-	h.injectTrace(ctx, &hm)
-
-	if h.broker != nil {
-		return h.dispatchUserCommand(ctx, userID, hm)
-	}
-
-	// Local dispatch.
-	return h.kickLocal(ctx, userID, originID)
-}
-
-func (h *hubEntity) KickSession(ctx context.Context, sessionID string) error {
-	ctx = normalizeContext(ctx)
-	if err := h.ensureOpen(); err != nil {
-		return err
-	}
-	if err := requireSessionID(sessionID); err != nil {
-		return err
-	}
-	hubKick.Inc()
-
-	hm := hubMessage{
-		Type:   "session_kick",
-		Target: sessionID,
-	}
-	h.injectTrace(ctx, &hm)
-
-	if h.broker != nil {
-		return h.dispatchSessionCommand(ctx, sessionID, hm)
-	}
-
-	return h.kickSessionLocal(ctx, sessionID)
-}
-
-func (h *hubEntity) Join(ctx context.Context, sessionID string, room string) error {
-	ctx = normalizeContext(ctx)
-	if err := h.ensureOpen(); err != nil {
-		return err
-	}
-	if err := requireSessionAndRoom(sessionID, room); err != nil {
-		return err
-	}
-
-	route, created, err := h.joinLocal(ctx, sessionID, room)
-	if err != nil || route == nil {
-		return err
-	}
-	if created {
-		h.startRoomRoute(room, route)
+	if createRoute {
+		subscription, err := h.broker.Subscribe(ctx, h.userChannel(conn.UserID()), func(data []byte) {
+			h.handleUserCommand(conn.UserID(), data)
+		})
+		h.completeRoute(route, subscription, err)
+		if err != nil {
+			return errors.Join(err, h.rollbackRegister(conn))
+		}
+		return nil
 	}
 	if err := route.wait(ctx); err != nil {
-		h.rollbackJoin(sessionID, room)
-		return err
+		return errors.Join(err, h.rollbackRegister(conn))
 	}
 	return nil
 }
 
-func (h *hubEntity) Leave(ctx context.Context, sessionID string, room string) error {
-	ctx = normalizeContext(ctx)
-	if err := h.ensureOpen(); err != nil {
+func (h *hubEntity) Unregister(ctx context.Context, conn Connect) error {
+	if err := validateContext(ctx); err != nil {
 		return err
 	}
-	if err := requireSessionAndRoom(sessionID, room); err != nil {
-		return err
+	if conn == nil {
+		return ErrConnectionRequired
 	}
-
-	cancel, err := h.leaveLocal(ctx, sessionID, room)
-	if cancel != nil {
-		cancel()
+	var subscriptions []Subscription
+	h.mu.Lock()
+	if _, exists := h.connections[conn]; !exists {
+		h.mu.Unlock()
+		return nil
 	}
-	return err
+	delete(h.connections, conn)
+	delete(h.sessions, conn.SessionID())
+	if userID := conn.UserID(); userID != "" {
+		delete(h.userIndex[userID], conn)
+		if len(h.userIndex[userID]) == 0 {
+			delete(h.userIndex, userID)
+		}
+		if route := h.userRoutes[userID]; route != nil {
+			route.refs--
+			if route.refs == 0 {
+				delete(h.userRoutes, userID)
+				if route.subscription != nil {
+					subscriptions = append(subscriptions, route.subscription)
+				}
+			}
+		}
+	}
+	if member, ok := conn.(roomMember); ok {
+		for _, room := range member.rooms() {
+			delete(h.rooms[room], conn)
+			if len(h.rooms[room]) == 0 {
+				delete(h.rooms, room)
+			}
+			member.leaveRoom(room)
+			if route := h.roomRoutes[room]; route != nil {
+				route.refs--
+				if route.refs == 0 {
+					delete(h.roomRoutes, room)
+					if route.subscription != nil {
+						subscriptions = append(subscriptions, route.subscription)
+					}
+				}
+			}
+		}
+	}
+	h.mu.Unlock()
+	return closeSubscriptions(ctx, subscriptions)
 }
 
-func (h *hubEntity) BroadcastToRoom(ctx context.Context, room string, msg []byte) error {
-	ctx = normalizeContext(ctx)
-	if err := h.ensureOpen(); err != nil {
+func (h *hubEntity) Broadcast(ctx context.Context, payload []byte) error {
+	return h.dispatch(ctx, h.channel, brokerCommand{Type: commandBroadcast, Payload: payload})
+}
+
+func (h *hubEntity) SendToUser(ctx context.Context, userID string, payload []byte) error {
+	if err := requireUserID(userID); err != nil {
 		return err
 	}
+	return h.dispatch(ctx, h.userChannel(userID), brokerCommand{Type: commandSendUser, Target: userID, Payload: payload})
+}
+
+func (h *hubEntity) BroadcastToRoom(ctx context.Context, room string, payload []byte) error {
 	if err := requireRoom(room); err != nil {
 		return err
 	}
-	hubRoomOps.WithLabelValues("broadcast").Inc()
-
-	if h.broker != nil {
-		rm := roomMessage{
-			Type:    "broadcast",
-			Payload: msg,
-		}
-		h.injectRoomTrace(ctx, &rm)
-		return h.dispatchRoomCommand(ctx, room, rm)
-	}
-
-	// Local dispatch.
-	return h.broadcastToRoomLocal(ctx, room, msg)
+	return h.dispatch(ctx, h.roomChannel(room), brokerCommand{Type: commandBroadcastRoom, Room: room, Payload: payload})
 }
 
-func (h *hubEntity) KickRoom(ctx context.Context, room string) error {
-	ctx = normalizeContext(ctx)
-	if err := h.ensureOpen(); err != nil {
+func (h *hubEntity) DisconnectUser(ctx context.Context, userID string, payload []byte) error {
+	if err := requireUserID(userID); err != nil {
 		return err
 	}
+	return h.dispatch(ctx, h.userChannel(userID), brokerCommand{Type: commandDisconnectUser, Target: userID, Payload: payload})
+}
+
+func (h *hubEntity) DisconnectRoom(ctx context.Context, room string, payload []byte) error {
 	if err := requireRoom(room); err != nil {
 		return err
 	}
-	hubRoomOps.WithLabelValues("kick").Inc()
-
-	if h.broker != nil {
-		rm := roomMessage{
-			Type: "kick",
-		}
-		h.injectRoomTrace(ctx, &rm)
-		return h.dispatchRoomCommand(ctx, room, rm)
-	}
-
-	return h.kickRoomLocal(ctx, room)
+	return h.dispatch(ctx, h.roomChannel(room), brokerCommand{Type: commandDisconnectRoom, Room: room, Payload: payload})
 }
 
-func (h *hubEntity) Broadcast(ctx context.Context, msg []byte) error {
-	ctx = normalizeContext(ctx)
-	if err := h.ensureOpen(); err != nil {
-		return err
-	}
-	hubBroadcast.Inc()
-
-	// Wrap in protocol
-	hm := hubMessage{
-		Type:    "broadcast",
-		Payload: msg,
-	}
-	h.injectTrace(ctx, &hm)
-
-	if h.broker != nil {
-		return h.dispatchDistributed(ctx, hm)
-	}
-
-	// Local dispatch.
-	return h.broadcastLocal(ctx, msg)
-}
-
-func (h *hubEntity) SendTo(ctx context.Context, userID string, msg []byte) error {
-	return h.SendToWithOrigin(ctx, userID, msg, "")
-}
-
-func (h *hubEntity) SendToSession(ctx context.Context, sessionID string, msg []byte) error {
-	ctx = normalizeContext(ctx)
-	if err := h.ensureOpen(); err != nil {
+func (h *hubEntity) JoinSessionToRoom(ctx context.Context, sessionID, room string) error {
+	if err := validateContext(ctx); err != nil {
 		return err
 	}
 	if err := requireSessionID(sessionID); err != nil {
 		return err
 	}
-
-	hm := hubMessage{
-		Type:    "session_unicast",
-		Target:  sessionID,
-		Payload: msg,
-	}
-	h.injectTrace(ctx, &hm)
-
-	if h.broker != nil {
-		return h.dispatchSessionCommand(ctx, sessionID, hm)
-	}
-
-	return h.sendToSessionLocal(ctx, sessionID, msg)
-}
-
-func (h *hubEntity) SendToWithOrigin(ctx context.Context, userID string, msg []byte, originID string) error {
-	ctx = normalizeContext(ctx)
-	if err := h.ensureOpen(); err != nil {
+	if err := requireRoom(room); err != nil {
 		return err
 	}
+	h.mu.RLock()
+	conn := h.sessions[sessionID]
+	h.mu.RUnlock()
+	if conn == nil {
+		return ErrSessionNotFound
+	}
+	return h.joinConnectionsToRoom(ctx, []Connect{conn}, room)
+}
+
+func (h *hubEntity) JoinUserToRoom(ctx context.Context, userID, room string) error {
 	if err := requireUserID(userID); err != nil {
 		return err
 	}
-	// Wrap in protocol
-	hm := hubMessage{
-		Type:     "unicast",
-		Target:   userID,
-		Payload:  msg,
-		OriginID: originID,
-	}
-	h.injectTrace(ctx, &hm)
-
-	if h.broker != nil {
-		return h.dispatchUserCommand(ctx, userID, hm)
-	}
-
-	// Local dispatch.
-	return h.sendToLocal(ctx, userID, msg, originID)
-}
-
-func (h *hubEntity) BroadcastJSON(ctx context.Context, v interface{}) error {
-	ctx = normalizeContext(ctx)
-	data, err := json.Marshal(v)
-	if err != nil {
+	if err := requireRoom(room); err != nil {
 		return err
 	}
-	return h.Broadcast(ctx, data)
+	return h.dispatch(ctx, h.userChannel(userID), brokerCommand{Type: commandJoinUserRoom, Target: userID, Room: room})
 }
 
-func (h *hubEntity) SendJSONTo(ctx context.Context, userID string, v interface{}) error {
-	return h.SendJSONToWithOrigin(ctx, userID, v, "")
-}
-
-func (h *hubEntity) SendJSONToWithOrigin(ctx context.Context, userID string, v interface{}, originID string) error {
-	ctx = normalizeContext(ctx)
-	data, err := json.Marshal(v)
-	if err != nil {
+func (h *hubEntity) LeaveUserFromRoom(ctx context.Context, userID, room string) error {
+	if err := requireUserID(userID); err != nil {
 		return err
 	}
-	return h.SendToWithOrigin(ctx, userID, data, originID)
+	if err := requireRoom(room); err != nil {
+		return err
+	}
+	return h.dispatch(ctx, h.userChannel(userID), brokerCommand{Type: commandLeaveUserRoom, Target: userID, Room: room})
 }
 
-func (h *hubEntity) handleBrokerMessage(data []byte) {
-	var hm hubMessage
-	if err := json.Unmarshal(data, &hm); err != nil {
-		return
+func (h *hubEntity) dispatch(ctx context.Context, channel string, command brokerCommand) error {
+	if err := validateContext(ctx); err != nil {
+		return err
+	}
+	if err := h.ensureRunning(); err != nil {
+		return err
+	}
+	commandCtx, cancel := h.commandContext(ctx)
+	defer cancel()
+	h.injectTrace(commandCtx, &command)
+	if h.broker == nil {
+		return h.execute(commandCtx, command)
 	}
 
-	// Extract Trace
-	ctx := h.extractTrace(&hm)
-	err := h.executeCommand(ctx, hm)
-	if hm.RequestID != "" && hm.ReplyTo != "" && h.broker != nil {
-		h.publishAck(ctx, hm, err)
-	}
-}
-
-func (h *hubEntity) handleAckMessage(data []byte) {
-	var hm hubMessage
-	if err := json.Unmarshal(data, &hm); err != nil {
-		return
-	}
-	if hm.Type != "ack" || hm.RequestID == "" || hm.NodeID == "" {
-		return
-	}
-
+	requestID := uuid.NewString()
+	pending := newPendingCommand()
 	h.pendingMu.Lock()
-	pending := h.pending[hm.RequestID]
+	h.pending[requestID] = pending
 	h.pendingMu.Unlock()
-	if pending == nil {
-		return
-	}
+	defer h.deletePending(requestID)
 
-	pending.ack(hm.NodeID, hm.Error)
+	command.RequestID = requestID
+	command.ReplyTo = h.ackChannel
+	command.NodeID = h.nodeID
+	data, err := json.Marshal(command)
+	if err != nil {
+		return err
+	}
+	expected, err := h.broker.Publish(commandCtx, channel, data)
+	if err != nil {
+		return err
+	}
+	pending.expect(expected)
+	return pending.wait(commandCtx)
 }
 
-func (h *hubEntity) handleUserBrokerMessage(userID string, data []byte) {
-	var hm hubMessage
-	if err := json.Unmarshal(data, &hm); err != nil {
+func (h *hubEntity) handleCommand(data []byte) { h.handleBoundCommand("", "", data) }
+func (h *hubEntity) handleUserCommand(userID string, data []byte) {
+	h.handleBoundCommand(userID, "", data)
+}
+func (h *hubEntity) handleRoomCommand(room string, data []byte) { h.handleBoundCommand("", room, data) }
+
+func (h *hubEntity) handleBoundCommand(userID, room string, data []byte) {
+	var command brokerCommand
+	if err := json.Unmarshal(data, &command); err != nil {
 		return
 	}
-
-	if hm.Target == "" {
-		hm.Target = userID
+	if command.Target == "" {
+		command.Target = userID
 	}
-
-	ctx := h.extractTrace(&hm)
-	err := h.executeCommand(ctx, hm)
-	if hm.RequestID != "" && hm.ReplyTo != "" && h.broker != nil {
-		h.publishAck(ctx, hm, err)
+	if command.Room == "" {
+		command.Room = room
+	}
+	ctx, cancel := context.WithTimeout(h.extractTrace(command.TraceHeader), h.commandTimeout)
+	err := h.execute(ctx, command)
+	cancel()
+	if command.RequestID != "" && command.ReplyTo != "" {
+		h.publishAck(command, err)
 	}
 }
 
-func (h *hubEntity) handleRoomBrokerMessage(room string, data []byte) {
-	var rm roomMessage
-	if err := json.Unmarshal(data, &rm); err != nil {
-		return
-	}
-
-	ctx := h.extractRoomTrace(&rm)
-	err := h.executeRoomCommand(ctx, room, rm)
-	if rm.RequestID != "" && rm.ReplyTo != "" && h.broker != nil {
-		h.publishRoomAck(ctx, rm, err)
-	}
-}
-
-func (h *hubEntity) executeRoomCommand(ctx context.Context, room string, rm roomMessage) error {
-	switch rm.Type {
-	case "", "broadcast":
-		return h.broadcastToRoomLocal(ctx, room, rm.Payload)
-	case "kick":
-		return h.kickRoomLocal(ctx, room)
+func (h *hubEntity) execute(ctx context.Context, command brokerCommand) error {
+	switch command.Type {
+	case commandBroadcast:
+		return h.sendConnections(ctx, h.snapshotAll(), command.Payload, false)
+	case commandSendUser:
+		return h.sendConnections(ctx, h.snapshotUser(command.Target), command.Payload, false)
+	case commandDisconnectUser:
+		return h.sendConnections(ctx, h.snapshotUser(command.Target), command.Payload, true)
+	case commandJoinUserRoom:
+		return h.joinConnectionsToRoom(ctx, h.snapshotUser(command.Target), command.Room)
+	case commandLeaveUserRoom:
+		return h.leaveConnectionsFromRoom(ctx, h.snapshotUser(command.Target), command.Room)
+	case commandBroadcastRoom:
+		return h.sendConnections(ctx, h.snapshotRoom(command.Room), command.Payload, false)
+	case commandDisconnectRoom:
+		return h.sendConnections(ctx, h.snapshotRoom(command.Room), command.Payload, true)
 	default:
-		return fmt.Errorf("wsx: unsupported room message type %q", rm.Type)
-	}
-	return nil
-}
-
-func (h *hubEntity) executeCommand(ctx context.Context, hm hubMessage) error {
-	switch hm.Type {
-	case "broadcast":
-		return h.broadcastLocal(ctx, hm.Payload)
-	case "unicast":
-		return h.sendToLocal(ctx, hm.Target, hm.Payload, hm.OriginID)
-	case "kick":
-		return h.kickLocal(ctx, hm.Target, hm.OriginID)
-	case "session_unicast":
-		return h.sendToSessionLocal(ctx, hm.Target, hm.Payload)
-	case "session_kick":
-		return h.kickSessionLocal(ctx, hm.Target)
-	default:
-		return fmt.Errorf("wsx: unsupported hub message type %q", hm.Type)
+		return fmt.Errorf("wsx: unsupported broker command %q", command.Type)
 	}
 }
 
-func (h *hubEntity) dispatchDistributed(ctx context.Context, hm hubMessage) error {
-	ctx, cancel := h.commandContext(ctx)
-	defer cancel()
-
-	expected, err := h.broker.NumSubscribers(ctx, h.channel)
-	if err != nil {
-		return err
-	}
-	if expected == 0 {
+func (h *hubEntity) joinConnectionsToRoom(ctx context.Context, conns []Connect, room string) error {
+	if len(conns) == 0 {
 		return nil
 	}
-
-	requestID := uuid.NewString()
-	pending := newPendingCommand(expected)
-
-	h.pendingMu.Lock()
-	h.pending[requestID] = pending
-	h.pendingMu.Unlock()
-	defer h.deletePending(requestID)
-
-	hm.RequestID = requestID
-	hm.ReplyTo = h.ackChannel
-	hm.NodeID = h.nodeID
-
-	data, err := json.Marshal(hm)
-	if err != nil {
-		return err
-	}
-	if err := h.broker.Publish(ctx, h.channel, data); err != nil {
-		return err
-	}
-
-	return pending.wait(ctx)
-}
-
-func (h *hubEntity) dispatchUserCommand(ctx context.Context, userID string, hm hubMessage) error {
-	ctx, cancel := h.commandContext(ctx)
-	defer cancel()
-
-	expected, err := h.broker.NumSubscribers(ctx, h.userChannel(userID))
-	if err != nil {
-		return err
-	}
-	if expected == 0 {
-		return nil
-	}
-
-	requestID := uuid.NewString()
-	pending := newPendingCommand(expected)
-
-	h.pendingMu.Lock()
-	h.pending[requestID] = pending
-	h.pendingMu.Unlock()
-	defer h.deletePending(requestID)
-
-	hm.RequestID = requestID
-	hm.ReplyTo = h.ackChannel
-	hm.NodeID = h.nodeID
-
-	data, err := json.Marshal(hm)
-	if err != nil {
-		return err
-	}
-	if err := h.broker.Publish(ctx, h.userChannel(userID), data); err != nil {
-		return err
-	}
-
-	return pending.wait(ctx)
-}
-
-func (h *hubEntity) dispatchSessionCommand(ctx context.Context, sessionID string, hm hubMessage) error {
-	ctx, cancel := h.commandContext(ctx)
-	defer cancel()
-
-	expected, err := h.broker.NumSubscribers(ctx, h.sessionChannel(sessionID))
-	if err != nil {
-		return err
-	}
-	if expected == 0 {
-		return nil
-	}
-
-	requestID := uuid.NewString()
-	pending := newPendingCommand(expected)
-
-	h.pendingMu.Lock()
-	h.pending[requestID] = pending
-	h.pendingMu.Unlock()
-	defer h.deletePending(requestID)
-
-	hm.RequestID = requestID
-	hm.ReplyTo = h.ackChannel
-	hm.NodeID = h.nodeID
-
-	data, err := json.Marshal(hm)
-	if err != nil {
-		return err
-	}
-	if err := h.broker.Publish(ctx, h.sessionChannel(sessionID), data); err != nil {
-		return err
-	}
-
-	return pending.wait(ctx)
-}
-
-func (h *hubEntity) dispatchRoomCommand(ctx context.Context, room string, rm roomMessage) error {
-	ctx, cancel := h.commandContext(ctx)
-	defer cancel()
-
-	expected, err := h.broker.NumSubscribers(ctx, h.roomChannel(room))
-	if err != nil {
-		return err
-	}
-	if expected == 0 {
-		return nil
-	}
-
-	requestID := uuid.NewString()
-	pending := newPendingCommand(expected)
-
-	h.pendingMu.Lock()
-	h.pending[requestID] = pending
-	h.pendingMu.Unlock()
-	defer h.deletePending(requestID)
-
-	rm.RequestID = requestID
-	rm.ReplyTo = h.ackChannel
-	rm.NodeID = h.nodeID
-
-	data, err := json.Marshal(rm)
-	if err != nil {
-		return err
-	}
-	if err := h.broker.Publish(ctx, h.roomChannel(room), data); err != nil {
-		return err
-	}
-
-	return pending.wait(ctx)
-}
-
-func (h *hubEntity) commandContext(ctx context.Context) (context.Context, context.CancelFunc) {
-	ctx = normalizeContext(ctx)
-	if _, ok := ctx.Deadline(); ok {
-		return ctx, func() {}
-	}
-	return context.WithTimeout(ctx, h.commandTimeout)
-}
-
-func (h *hubEntity) publishAck(ctx context.Context, hm hubMessage, execErr error) {
-	ack := hubMessage{
-		Type:      "ack",
-		RequestID: hm.RequestID,
-		ReplyTo:   hm.ReplyTo,
-		NodeID:    h.nodeID,
-	}
-	if execErr != nil {
-		ack.Error = execErr.Error()
-	}
-
-	data, err := json.Marshal(ack)
-	if err != nil {
-		hubCommandAcks.WithLabelValues("hub", "error").Inc()
-		return
-	}
-	if err := h.broker.Publish(ctx, hm.ReplyTo, data); err != nil {
-		hubCommandAcks.WithLabelValues("hub", "error").Inc()
-		return
-	}
-	hubCommandAcks.WithLabelValues("hub", "success").Inc()
-}
-
-func (h *hubEntity) publishRoomAck(ctx context.Context, rm roomMessage, execErr error) {
-	ack := hubMessage{
-		Type:      "ack",
-		RequestID: rm.RequestID,
-		ReplyTo:   rm.ReplyTo,
-		NodeID:    h.nodeID,
-	}
-	if execErr != nil {
-		ack.Error = execErr.Error()
-	}
-
-	data, err := json.Marshal(ack)
-	if err != nil {
-		hubCommandAcks.WithLabelValues("room", "error").Inc()
-		return
-	}
-	if err := h.broker.Publish(ctx, rm.ReplyTo, data); err != nil {
-		hubCommandAcks.WithLabelValues("room", "error").Inc()
-		return
-	}
-	hubCommandAcks.WithLabelValues("room", "success").Inc()
-}
-
-func (h *hubEntity) deletePending(requestID string) {
-	h.pendingMu.Lock()
-	defer h.pendingMu.Unlock()
-	delete(h.pending, requestID)
-}
-
-// injectTrace adds current span context to hubMessage
-func (h *hubEntity) injectTrace(ctx context.Context, hm *hubMessage) {
-	hm.TraceHeader = injectTraceHeader(ctx, hm.TraceHeader)
-}
-
-func (h *hubEntity) injectRoomTrace(ctx context.Context, rm *roomMessage) {
-	rm.TraceHeader = injectTraceHeader(ctx, rm.TraceHeader)
-}
-
-func injectTraceHeader(ctx context.Context, header map[string]string) map[string]string {
-	ctx = normalizeContext(ctx)
-	if header == nil {
-		header = make(map[string]string)
-	}
-	otel.GetTextMapPropagator().Inject(ctx, propagation.MapCarrier(header))
-	return header
-}
-
-// extractTrace gets context from hubMessage
-func (h *hubEntity) extractTrace(hm *hubMessage) context.Context {
-	return extractTraceHeader(hm.TraceHeader)
-}
-
-func (h *hubEntity) extractRoomTrace(rm *roomMessage) context.Context {
-	return extractTraceHeader(rm.TraceHeader)
-}
-
-func extractTraceHeader(header map[string]string) context.Context {
-	if header == nil {
-		return context.Background()
-	}
-	carrier := propagation.MapCarrier(header)
-	return otel.GetTextMapPropagator().Extract(context.Background(), carrier)
-}
-
-func (h *hubEntity) broadcastLocal(ctx context.Context, msg []byte) error {
-	h.mu.RLock()
-	// Snapshot connections to avoid holding lock during send
-	conns := make([]Connect, 0, len(h.connections))
-	for c := range h.connections {
-		conns = append(conns, c)
-	}
-	h.mu.RUnlock()
-
-	return h.batchSend(ctx, conns, msg)
-}
-
-func (h *hubEntity) sendToLocal(ctx context.Context, userID string, msg []byte, originID string) error {
-	h.mu.RLock()
-	// Snapshot connections
-	targetConns := h.userIndex[userID]
-	conns := make([]Connect, 0, len(targetConns))
-	for c := range targetConns {
-		// 排除发起方 Session
-		if originID == "" || c.SessionID() != originID {
-			conns = append(conns, c)
-		}
-	}
-	h.mu.RUnlock()
-
-	return h.batchSend(ctx, conns, msg)
-}
-
-func (h *hubEntity) sendToSessionLocal(ctx context.Context, sessionID string, msg []byte) error {
-	h.mu.RLock()
-	conn := h.sessionIndex[sessionID]
-	h.mu.RUnlock()
-	if conn == nil {
-		return nil
-	}
-	return h.sendWithTimeout(ctx, conn, msg)
-}
-
-func (h *hubEntity) kickLocal(ctx context.Context, userID string, originID string) error {
-	_ = ctx
-	var err error
-	h.mu.RLock()
-	targetConns := h.userIndex[userID]
-	conns := make([]Connect, 0, len(targetConns))
-	for c := range targetConns {
-		// 只有当 SessionID 不等于 originID 时才踢掉，防止自杀
-		if originID == "" || c.SessionID() != originID {
-			conns = append(conns, c)
-		}
-	}
-	h.mu.RUnlock()
-
-	for _, c := range conns {
-		err = errors.Join(err, c.Close())
-	}
-	return err
-}
-
-func (h *hubEntity) kickSessionLocal(ctx context.Context, sessionID string) error {
-	_ = ctx
-	h.mu.RLock()
-	conn := h.sessionIndex[sessionID]
-	h.mu.RUnlock()
-	if conn == nil {
-		return nil
-	}
-	return conn.Close()
-}
-
-func (h *hubEntity) broadcastToRoomLocal(ctx context.Context, room string, msg []byte) error {
-	h.mu.RLock()
-	targetConns := h.rooms[room]
-	conns := make([]Connect, 0, len(targetConns))
-	for c := range targetConns {
-		conns = append(conns, c)
-	}
-	h.mu.RUnlock()
-
-	return h.batchSend(ctx, conns, msg)
-}
-
-func (h *hubEntity) kickRoomLocal(ctx context.Context, room string) error {
-	_ = ctx
-	var err error
-	h.mu.RLock()
-	targetConns := h.rooms[room]
-	conns := make([]Connect, 0, len(targetConns))
-	for c := range targetConns {
-		conns = append(conns, c)
-	}
-	h.mu.RUnlock()
-
-	for _, c := range conns {
-		err = errors.Join(err, c.Close())
-	}
-	return err
-}
-
-func (h *hubEntity) joinLocal(ctx context.Context, sessionID string, room string) (*subscriptionRoute, bool, error) {
-	_ = ctx
+	var route *subscriptionRoute
+	var createRoute bool
+	joined := make([]Connect, 0, len(conns))
 	h.mu.Lock()
-	defer h.mu.Unlock()
-
-	conn := h.sessionIndex[sessionID]
-	if conn == nil {
-		return nil, false, errHubSessionNotFound
+	if err := h.ensureRunningLocked(); err != nil {
+		h.mu.Unlock()
+		return err
 	}
-	member, ok := conn.(roomMember)
-	if !ok {
-		return nil, false, errHubRoomMembershipUnsupported
-	}
-
-	if roomConns := h.rooms[room]; roomConns != nil {
-		if _, exists := roomConns[conn]; exists {
-			return nil, false, nil
+	for _, conn := range conns {
+		member, ok := conn.(roomMember)
+		if !ok {
+			h.mu.Unlock()
+			return ErrRoomMembershipUnsupported
+		}
+		if _, exists := h.connections[conn]; !exists {
+			continue
+		}
+		if _, exists := h.rooms[room][conn]; exists {
+			continue
+		}
+		if member.roomCount() >= h.maxRoomsPerConnect {
+			h.mu.Unlock()
+			limitExceeded.WithLabelValues("max_rooms").Inc()
+			return ErrRoomLimitExceeded
 		}
 	}
-
-	if member.roomCount() >= h.maxRoomsPerConnect {
-		limitExceeded.WithLabelValues("max_rooms").Inc()
-		return nil, false, fmt.Errorf("wsx: session %s exceeded max rooms", conn.SessionID())
-	}
-
 	if h.rooms[room] == nil {
 		h.rooms[room] = make(map[Connect]struct{})
 	}
-	h.rooms[room][conn] = struct{}{}
-	member.joinRoom(room)
-	hubRoomOps.WithLabelValues("join").Inc()
-
-	if h.broker == nil {
-		return nil, false, nil
-	}
-
-	route := h.roomRoutes[room]
-	created := false
-	if route == nil {
-		route = newSubscriptionRoute()
-		h.roomRoutes[room] = route
-		created = true
-	}
-	route.refs++
-	return route, created, nil
-}
-
-func (h *hubEntity) leaveLocal(ctx context.Context, sessionID string, room string) (context.CancelFunc, error) {
-	_ = ctx
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
-	conn := h.sessionIndex[sessionID]
-	if conn == nil {
-		return nil, errHubSessionNotFound
-	}
-
-	roomConns := h.rooms[room]
-	if roomConns == nil {
-		return nil, nil
-	}
-
-	if _, ok := roomConns[conn]; !ok {
-		return nil, nil
-	}
-
-	delete(roomConns, conn)
-	if member, ok := conn.(roomMember); ok {
-		member.leaveRoom(room)
-	}
-	hubRoomOps.WithLabelValues("leave").Inc()
-
-	if len(roomConns) == 0 {
-		delete(h.rooms, room)
-	}
-
-	if h.broker == nil {
-		return nil, nil
-	}
-
-	route := h.roomRoutes[room]
-	if route == nil {
-		return nil, nil
-	}
-	if route.refs > 0 {
-		route.refs--
-	}
-	if route.refs > 0 {
-		return nil, nil
-	}
-
-	delete(h.roomRoutes, room)
-	return route.cancel, nil
-}
-
-func (h *hubEntity) batchSend(ctx context.Context, conns []Connect, msg []byte) error {
-	ctx = normalizeContext(ctx)
-
-	// For small number of connections, send sequentially to avoid goroutine overhead
-	if len(conns) <= 10 {
-		var sendErr error
-		for _, c := range conns {
-			sendErr = errors.Join(sendErr, h.sendWithTimeout(ctx, c, msg))
+	for _, conn := range conns {
+		member, ok := conn.(roomMember)
+		if !ok {
+			continue
 		}
-		return sendErr
+		if _, registered := h.connections[conn]; !registered {
+			continue
+		}
+		if _, exists := h.rooms[room][conn]; exists {
+			continue
+		}
+		h.rooms[room][conn] = struct{}{}
+		member.joinRoom(room)
+		joined = append(joined, conn)
 	}
-
-	// For larger numbers, use a bit of concurrency
-	// We use a semaphore-like approach or just simple goroutines if the number isn't extreme.
-	// Considering SendBinary is non-blocking (it just pushes to a channel),
-	// the main bottleneck would be many connections with full channels.
-
-	var wg sync.WaitGroup
-	var sendErr error
-	var errMu sync.Mutex
-	// Limit concurrency to avoid spawning too many goroutines at once
-	sem := make(chan struct{}, h.maxConcurrentSends)
-
-	for _, c := range conns {
-		wg.Add(1)
-		go func(conn Connect) {
-			defer wg.Done()
-			select {
-			case sem <- struct{}{}:
-				defer func() { <-sem }()
-			case <-ctx.Done():
-				return
-			}
-
-			if err := h.sendWithTimeout(ctx, conn, msg); err != nil {
-				errMu.Lock()
-				sendErr = errors.Join(sendErr, err)
-				errMu.Unlock()
-			}
-		}(c)
+	if h.broker != nil && len(joined) > 0 {
+		route = h.roomRoutes[room]
+		if route == nil {
+			route = newSubscriptionRoute()
+			h.roomRoutes[room] = route
+			createRoute = true
+		}
+		route.refs += len(joined)
 	}
-	wg.Wait()
-	return sendErr
-}
-
-func (h *hubEntity) Count() int64 {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	return int64(len(h.connections))
-}
-
-func (h *hubEntity) Close() error {
-	h.closeOnce.Do(func() {
-		var closeErr error
-		h.mu.Lock()
-		h.closed = true
-		cancel := h.subscribeCancel
-		routeCancels := make([]context.CancelFunc, 0, len(h.userRoutes)+len(h.sessionRoutes)+len(h.roomRoutes))
-		for _, route := range h.userRoutes {
-			if route != nil && route.cancel != nil {
-				routeCancels = append(routeCancels, route.cancel)
-			}
-		}
-		for _, route := range h.sessionRoutes {
-			if route != nil && route.cancel != nil {
-				routeCancels = append(routeCancels, route.cancel)
-			}
-		}
-		for _, route := range h.roomRoutes {
-			if route != nil && route.cancel != nil {
-				routeCancels = append(routeCancels, route.cancel)
-			}
-		}
-		// Snapshot to avoid holding lock during Close which might trigger callbacks or be slow
-		conns := make([]Connect, 0, len(h.connections))
-		for c := range h.connections {
-			conns = append(conns, c)
-		}
-		// Clear maps immediately to prevent further operations
-		h.connections = make(map[Connect]struct{})
-		h.userIndex = make(map[string]map[Connect]struct{})
-		h.sessionIndex = make(map[string]Connect)
-		h.sessionRoutes = make(map[string]*subscriptionRoute)
-		h.userRoutes = make(map[string]*subscriptionRoute)
-		h.rooms = make(map[string]map[Connect]struct{})
-		h.roomRoutes = make(map[string]*subscriptionRoute)
-		h.mu.Unlock()
-
-		h.pendingMu.Lock()
-		pending := make([]*pendingCommand, 0, len(h.pending))
-		for requestID, command := range h.pending {
-			pending = append(pending, command)
-			delete(h.pending, requestID)
-		}
-		h.pendingMu.Unlock()
-
-		if cancel != nil {
-			cancel()
-		}
-		for _, routeCancel := range routeCancels {
-			routeCancel()
-		}
-		for _, command := range pending {
-			command.fail(errHubClosed)
-		}
-		for _, c := range conns {
-			closeErr = errors.Join(closeErr, c.Close())
-		}
-		h.closeErr = closeErr
-	})
-	return h.closeErr
-}
-
-func (h *hubEntity) sendWithTimeout(ctx context.Context, conn Connect, msg []byte) error {
-	if h.sendTimeout <= 0 {
-		return conn.SendBinary(ctx, msg)
+	h.mu.Unlock()
+	if len(joined) == 0 || route == nil {
+		return nil
 	}
-
-	sendCtx, cancel := context.WithTimeout(ctx, h.sendTimeout)
-	defer cancel()
-
-	return conn.SendBinary(sendCtx, msg)
-}
-
-func (h *hubEntity) ensureOpen() error {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	if h.closed {
-		return errHubClosed
+	if createRoute {
+		subscription, err := h.broker.Subscribe(ctx, h.roomChannel(room), func(data []byte) {
+			h.handleRoomCommand(room, data)
+		})
+		h.completeRoute(route, subscription, err)
+		if err != nil {
+			return errors.Join(err, h.rollbackRoomJoin(joined, room))
+		}
+		return nil
+	}
+	if err := route.wait(ctx); err != nil {
+		return errors.Join(err, h.rollbackRoomJoin(joined, room))
 	}
 	return nil
 }
 
-func (h *hubEntity) startRoomRoute(room string, route *subscriptionRoute) {
-	go func() {
-		err := h.broker.Subscribe(route.ctx, h.roomChannel(room), func(data []byte) {
-			h.handleRoomBrokerMessage(room, data)
-		})
-
-		h.mu.Lock()
-		route.err = err
-		close(route.ready)
-		if err != nil && h.roomRoutes[room] == route && route.refs == 0 {
-			delete(h.roomRoutes, room)
-		}
-		h.mu.Unlock()
-	}()
-}
-
-func (h *hubEntity) activateUserRoute(userID string, route *subscriptionRoute) error {
-	err := h.broker.Subscribe(route.ctx, h.userChannel(userID), func(data []byte) {
-		h.handleUserBrokerMessage(userID, data)
-	})
-	route.err = err
-	close(route.ready)
-	return err
-}
-
-func (h *hubEntity) activateSessionRoute(sessionID string, route *subscriptionRoute) error {
-	err := h.broker.Subscribe(route.ctx, h.sessionChannel(sessionID), func(data []byte) {
-		h.handleBrokerMessage(data)
-	})
-	route.err = err
-	close(route.ready)
-	return err
-}
-
-func (h *hubEntity) rollbackRegister(c Connect) {
-	var cancels []context.CancelFunc
-
+func (h *hubEntity) leaveConnectionsFromRoom(ctx context.Context, conns []Connect, room string) error {
+	var subscription Subscription
 	h.mu.Lock()
-	delete(h.connections, c)
-	if sid := c.SessionID(); sid != "" && h.sessionIndex[sid] == c {
-		delete(h.sessionIndex, sid)
-		if route := h.sessionRoutes[sid]; route != nil {
-			if route.refs > 0 {
-				route.refs--
-			}
-			if route.refs == 0 {
-				delete(h.sessionRoutes, sid)
-				if route.cancel != nil {
-					cancels = append(cancels, route.cancel)
-				}
-			}
+	removed := 0
+	for _, conn := range conns {
+		if _, exists := h.rooms[room][conn]; !exists {
+			continue
 		}
+		delete(h.rooms[room], conn)
+		if member, ok := conn.(roomMember); ok {
+			member.leaveRoom(room)
+		}
+		removed++
 	}
-	if uid := c.UserID(); uid != "" {
-		if conns := h.userIndex[uid]; conns != nil {
-			delete(conns, c)
-			if len(conns) == 0 {
-				delete(h.userIndex, uid)
-			}
-		}
-		if route := h.userRoutes[uid]; route != nil {
-			if route.refs > 0 {
-				route.refs--
-			}
-			if route.refs == 0 {
-				delete(h.userRoutes, uid)
-				if route.cancel != nil {
-					cancels = append(cancels, route.cancel)
-				}
-			}
+	if len(h.rooms[room]) == 0 {
+		delete(h.rooms, room)
+	}
+	if route := h.roomRoutes[room]; route != nil {
+		route.refs -= removed
+		if route.refs <= 0 {
+			delete(h.roomRoutes, room)
+			subscription = route.subscription
 		}
 	}
 	h.mu.Unlock()
+	if subscription != nil {
+		return subscription.Close(ctx)
+	}
+	return nil
+}
 
-	for _, cancel := range cancels {
-		cancel()
+func (h *hubEntity) rollbackRoomJoin(conns []Connect, room string) error {
+	rollbackCtx, cancel := context.WithTimeout(context.Background(), h.commandTimeout)
+	err := h.leaveConnectionsFromRoom(rollbackCtx, conns, room)
+	cancel()
+	return err
+}
+
+func (h *hubEntity) sendConnections(ctx context.Context, conns []Connect, payload []byte, disconnect bool) error {
+	var wg sync.WaitGroup
+	var errMu sync.Mutex
+	var result error
+	sem := make(chan struct{}, h.maxConcurrentSends)
+	for _, conn := range conns {
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			wg.Wait()
+			errMu.Lock()
+			result = errors.Join(result, ctx.Err())
+			errMu.Unlock()
+			return result
+		}
+		wg.Add(1)
+		go func(conn Connect) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			var err error
+			if len(payload) > 0 {
+				err = conn.WriteMessage(ctx, websocket.MessageBinary, payload)
+			}
+			if disconnect {
+				err = errors.Join(err, conn.CloseNow())
+			}
+			if err != nil {
+				errMu.Lock()
+				result = errors.Join(result, err)
+				errMu.Unlock()
+			}
+		}(conn)
+	}
+	wg.Wait()
+	return result
+}
+
+func (h *hubEntity) shutdown(ctx context.Context) error {
+	if err := validateContext(ctx); err != nil {
+		return err
+	}
+	h.shutdownMu.Lock()
+	h.mu.Lock()
+	if !h.closed {
+		h.closed = true
+		subs := make([]Subscription, 0, 2+len(h.userRoutes)+len(h.roomRoutes))
+		if h.globalSubscription != nil {
+			subs = append(subs, h.globalSubscription)
+		}
+		if h.ackSubscription != nil {
+			subs = append(subs, h.ackSubscription)
+		}
+		for _, route := range h.userRoutes {
+			if route.subscription != nil {
+				subs = append(subs, route.subscription)
+			}
+		}
+		for _, route := range h.roomRoutes {
+			if route.subscription != nil {
+				subs = append(subs, route.subscription)
+			}
+		}
+		h.mu.Unlock()
+		h.shutdownErr = errors.Join(h.shutdownErr, closeSubscriptions(ctx, subs))
+		h.pendingMu.Lock()
+		for id, pending := range h.pending {
+			pending.fail(ErrHubClosed)
+			delete(h.pending, id)
+		}
+		h.pendingMu.Unlock()
+		if h.broker != nil {
+			h.shutdownErr = errors.Join(h.shutdownErr, h.broker.Shutdown(ctx))
+		}
+	} else {
+		h.mu.Unlock()
+	}
+	err := h.shutdownErr
+	h.shutdownMu.Unlock()
+	return err
+}
+
+func (h *hubEntity) rollbackRegister(conn Connect) error {
+	rollbackCtx, cancel := context.WithTimeout(context.Background(), h.commandTimeout)
+	err := h.Unregister(rollbackCtx, conn)
+	cancel()
+	return err
+}
+
+func (h *hubEntity) completeRoute(route *subscriptionRoute, subscription Subscription, err error) {
+	h.mu.Lock()
+	route.subscription = subscription
+	route.err = err
+	close(route.ready)
+	h.mu.Unlock()
+}
+
+func (h *hubEntity) snapshotAll() []Connect {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	result := make([]Connect, 0, len(h.connections))
+	for conn := range h.connections {
+		result = append(result, conn)
+	}
+	return result
+}
+
+func (h *hubEntity) snapshotUser(userID string) []Connect {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	result := make([]Connect, 0, len(h.userIndex[userID]))
+	for conn := range h.userIndex[userID] {
+		result = append(result, conn)
+	}
+	return result
+}
+
+func (h *hubEntity) snapshotRoom(room string) []Connect {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	result := make([]Connect, 0, len(h.rooms[room]))
+	for conn := range h.rooms[room] {
+		result = append(result, conn)
+	}
+	return result
+}
+
+func (h *hubEntity) ensureRunning() error {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.ensureRunningLocked()
+}
+
+func (h *hubEntity) ensureRunningLocked() error {
+	if h.closed {
+		return ErrHubClosed
+	}
+	if !h.started {
+		return ErrHubNotStarted
+	}
+	return nil
+}
+
+func (h *hubEntity) commandContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, h.commandTimeout)
+}
+
+func (h *hubEntity) publishAck(command brokerCommand, execErr error) {
+	ack := brokerCommand{RequestID: command.RequestID, NodeID: h.nodeID}
+	if execErr != nil {
+		ack.Error = execErr.Error()
+	}
+	data, err := json.Marshal(ack)
+	if err != nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), h.commandTimeout)
+	_, _ = h.broker.Publish(ctx, command.ReplyTo, data)
+	cancel()
+}
+
+func (h *hubEntity) handleAck(data []byte) {
+	var ack brokerCommand
+	if json.Unmarshal(data, &ack) != nil {
+		return
+	}
+	h.pendingMu.Lock()
+	pending := h.pending[ack.RequestID]
+	h.pendingMu.Unlock()
+	if pending != nil {
+		pending.ack(ack.NodeID, ack.Error)
 	}
 }
 
-func (h *hubEntity) rollbackJoin(sessionID string, room string) {
-	cancel, err := h.leaveLocal(context.Background(), sessionID, room)
-	if err == nil && cancel != nil {
-		cancel()
+func (h *hubEntity) deletePending(id string) {
+	h.pendingMu.Lock()
+	delete(h.pending, id)
+	h.pendingMu.Unlock()
+}
+
+func (h *hubEntity) injectTrace(ctx context.Context, command *brokerCommand) {
+	carrier := propagation.MapCarrier(command.TraceHeader)
+	if carrier == nil {
+		carrier = propagation.MapCarrier{}
+	}
+	otel.GetTextMapPropagator().Inject(ctx, carrier)
+	if len(carrier) > 0 {
+		command.TraceHeader = map[string]string(carrier)
 	}
 }
 
-func (h *hubEntity) userChannel(userID string) string {
-	return h.channel + ":user:" + userID
+func (h *hubEntity) extractTrace(header map[string]string) context.Context {
+	if len(header) == 0 {
+		return context.Background()
+	}
+	return otel.GetTextMapPropagator().Extract(context.Background(), propagation.MapCarrier(header))
 }
 
-func (h *hubEntity) sessionChannel(sessionID string) string {
-	return h.channel + ":session:" + sessionID
-}
+func (h *hubEntity) userChannel(userID string) string { return h.channel + ":user:" + userID }
+func (h *hubEntity) roomChannel(room string) string   { return h.channel + ":room:" + room }
 
-func (h *hubEntity) roomChannel(room string) string {
-	return h.channel + ":room:" + room
+func closeSubscriptions(ctx context.Context, subscriptions []Subscription) error {
+	var result error
+	for _, subscription := range subscriptions {
+		result = errors.Join(result, subscription.Close(ctx))
+	}
+	return result
 }
 
 func requireUserID(userID string) error {
 	if userID == "" {
-		return errHubUserIDMissing
+		return ErrUserIDRequired
 	}
 	return nil
 }
-
-func requireSessionAndRoom(sessionID string, room string) error {
-	if err := requireSessionID(sessionID); err != nil {
-		return err
-	}
-	return requireRoom(room)
-}
-
 func requireSessionID(sessionID string) error {
 	if sessionID == "" {
-		return errHubSessionIDMissing
+		return ErrSessionIDRequired
 	}
 	return nil
 }
-
 func requireRoom(room string) error {
 	if room == "" {
-		return errHubRoomMissing
+		return ErrRoomRequired
 	}
 	return nil
 }
 
 type subscriptionRoute struct {
-	refs   int
-	ctx    context.Context
-	cancel context.CancelFunc
-	ready  chan struct{}
-	err    error
+	refs         int
+	ready        chan struct{}
+	subscription Subscription
+	err          error
 }
 
-func newSubscriptionRoute() *subscriptionRoute {
-	ctx, cancel := context.WithCancel(context.Background())
-	return &subscriptionRoute{
-		ctx:    ctx,
-		cancel: cancel,
-		ready:  make(chan struct{}),
-	}
-}
+func newSubscriptionRoute() *subscriptionRoute { return &subscriptionRoute{ready: make(chan struct{})} }
 
 func (r *subscriptionRoute) wait(ctx context.Context) error {
-	if r == nil || r.ready == nil {
-		return nil
-	}
-
-	ctx = normalizeContext(ctx)
 	select {
 	case <-r.ready:
 		return r.err
@@ -1442,38 +784,42 @@ func (r *subscriptionRoute) wait(ctx context.Context) error {
 }
 
 type pendingCommand struct {
-	expected int64
-
-	mu       sync.Mutex
-	received map[string]struct{}
-	err      error
-	done     chan struct{}
-	once     sync.Once
+	mu        sync.Mutex
+	expected  int64
+	expectSet bool
+	received  map[string]struct{}
+	err       error
+	done      chan struct{}
+	once      sync.Once
 }
 
-func newPendingCommand(expected int64) *pendingCommand {
-	return &pendingCommand{
-		expected: expected,
-		received: make(map[string]struct{}),
-		done:     make(chan struct{}),
-	}
+func newPendingCommand() *pendingCommand {
+	return &pendingCommand{received: make(map[string]struct{}), done: make(chan struct{})}
 }
 
-func (p *pendingCommand) ack(nodeID string, ackErr string) {
+func (p *pendingCommand) expect(expected int64) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
+	p.expected = expected
+	p.expectSet = true
+	p.completeLocked()
+	p.mu.Unlock()
+}
 
-	if _, exists := p.received[nodeID]; exists {
-		return
+func (p *pendingCommand) ack(nodeID, message string) {
+	p.mu.Lock()
+	if _, exists := p.received[nodeID]; !exists {
+		p.received[nodeID] = struct{}{}
+		if message != "" {
+			p.err = errors.Join(p.err, fmt.Errorf("%s: %s", nodeID, message))
+		}
 	}
-	p.received[nodeID] = struct{}{}
-	if ackErr != "" {
-		p.err = errors.Join(p.err, fmt.Errorf("%s: %s", nodeID, ackErr))
-	}
-	if int64(len(p.received)) >= p.expected {
-		p.once.Do(func() {
-			close(p.done)
-		})
+	p.completeLocked()
+	p.mu.Unlock()
+}
+
+func (p *pendingCommand) completeLocked() {
+	if p.expectSet && int64(len(p.received)) >= p.expected {
+		p.once.Do(func() { close(p.done) })
 	}
 }
 
@@ -1492,7 +838,5 @@ func (p *pendingCommand) fail(err error) {
 	p.mu.Lock()
 	p.err = errors.Join(p.err, err)
 	p.mu.Unlock()
-	p.once.Do(func() {
-		close(p.done)
-	})
+	p.once.Do(func() { close(p.done) })
 }

@@ -10,217 +10,207 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+const redisSubscriberQueueSize = 1024
+
 type RedisBroker struct {
-	client        *redis.Client
-	ownsClient    bool
-	pubsub        *redis.PubSub
+	client     *redis.Client
+	ownsClient bool
+
 	mu            sync.RWMutex
+	pubsub        *redis.PubSub
 	handlers      map[string]map[uint64]*redisSubscriber
 	nextHandlerID uint64
 	closed        bool
-	closeOnce     sync.Once
+
+	readerWG sync.WaitGroup
+	workerWG sync.WaitGroup
+	closeMu  sync.Mutex
+	closeErr error
 }
 
-func NewRedisBroker(addr string, password string, db int) *RedisBroker {
-	rdb := redis.NewClient(&redis.Options{
-		Addr:     addr,
-		Password: password,
-		DB:       db,
-	})
+func NewRedisBroker(addr string, password string, db int) (*RedisBroker, error) {
+	if addr == "" {
+		return nil, ErrBrokerClientRequired
+	}
+	client := redis.NewClient(&redis.Options{Addr: addr, Password: password, DB: db})
+	return newRedisBroker(client, true)
+}
+
+func NewRedisBrokerWithClient(client *redis.Client) (*RedisBroker, error) {
+	return newRedisBroker(client, false)
+}
+
+func newRedisBroker(client *redis.Client, ownsClient bool) (*RedisBroker, error) {
+	if client == nil {
+		return nil, ErrBrokerClientRequired
+	}
 	return &RedisBroker{
-		client:     rdb,
-		ownsClient: true,
+		client:     client,
+		ownsClient: ownsClient,
 		handlers:   make(map[string]map[uint64]*redisSubscriber),
-	}
+	}, nil
 }
 
-func NewRedisBrokerWithClient(client *redis.Client) *RedisBroker {
-	return &RedisBroker{
-		client:   client,
-		handlers: make(map[string]map[uint64]*redisSubscriber),
+func (b *RedisBroker) Subscribe(ctx context.Context, channel string, handler func([]byte)) (Subscription, error) {
+	if err := validateContext(ctx); err != nil {
+		return nil, err
 	}
-}
-
-func (b *RedisBroker) Subscribe(ctx context.Context, channel string, handler func(msg []byte)) error {
-	ctx = normalizeContext(ctx)
 	if err := ctx.Err(); err != nil {
-		return err
+		return nil, err
 	}
 	if handler == nil {
-		return errBrokerHandlerMissing
+		return nil, ErrBrokerHandlerRequired
 	}
 
 	b.mu.Lock()
 	if b.closed {
 		b.mu.Unlock()
-		return errBrokerClosed
+		return nil, ErrBrokerClosed
 	}
-	if b.client == nil {
-		b.mu.Unlock()
-		return errBrokerClientMissing
-	}
-
-	subscriber := newRedisSubscriber(handler)
-	firstHandlerForChannel := len(b.handlers[channel]) == 0
-	if b.handlers[channel] == nil {
-		b.handlers[channel] = make(map[uint64]*redisSubscriber)
-	}
-	handlerID := b.nextHandlerID
-	b.nextHandlerID++
-	b.handlers[channel][handlerID] = subscriber
-
 	pubsub := b.pubsub
 	startReader := false
 	if pubsub == nil {
 		pubsub = b.client.Subscribe(ctx, channel)
+		if _, err := pubsub.Receive(ctx); err != nil {
+			b.mu.Unlock()
+			return nil, errors.Join(err, pubsub.Close())
+		}
 		b.pubsub = pubsub
 		startReader = true
+	} else if len(b.handlers[channel]) == 0 {
+		if err := pubsub.Subscribe(ctx, channel); err != nil {
+			b.mu.Unlock()
+			return nil, err
+		}
+	}
+
+	id := b.nextHandlerID
+	b.nextHandlerID++
+	subscriber := newRedisSubscriber(handler, &b.workerWG)
+	if b.handlers[channel] == nil {
+		b.handlers[channel] = make(map[uint64]*redisSubscriber)
+	}
+	b.handlers[channel][id] = subscriber
+	if startReader {
+		b.readerWG.Add(1)
 	}
 	b.mu.Unlock()
 
 	if startReader {
-		if err := b.awaitSubscription(ctx, pubsub); err != nil {
-			b.mu.Lock()
-			if b.pubsub == pubsub {
-				b.pubsub = nil
-			}
-			b.mu.Unlock()
-			subscriber.close()
-			b.removeHandler(channel, handlerID, false)
-			return errors.Join(err, pubsub.Close())
-		}
 		go b.readLoop(pubsub)
 	}
 
-	if !startReader && firstHandlerForChannel {
-		if err := pubsub.Subscribe(ctx, channel); err != nil {
-			subscriber.close()
-			b.removeHandler(channel, handlerID, false)
-			return err
-		}
-	}
-
-	go b.unsubscribeOnDone(ctx, channel, handlerID)
-
-	return nil
+	return &redisSubscription{broker: b, channel: channel, id: id}, nil
 }
 
-func (b *RedisBroker) Publish(ctx context.Context, channel string, msg []byte) error {
-	ctx = normalizeContext(ctx)
-
-	b.mu.RLock()
-	closed := b.closed
-	client := b.client
-	b.mu.RUnlock()
-	if closed {
-		return errBrokerClosed
-	}
-	if client == nil {
-		return errBrokerClientMissing
-	}
-	return client.Publish(ctx, channel, msg).Err()
-}
-
-func (b *RedisBroker) NumSubscribers(ctx context.Context, channel string) (int64, error) {
-	ctx = normalizeContext(ctx)
-
-	b.mu.RLock()
-	closed := b.closed
-	client := b.client
-	b.mu.RUnlock()
-	if closed {
-		return 0, errBrokerClosed
-	}
-	if client == nil {
-		return 0, errBrokerClientMissing
-	}
-
-	result, err := client.PubSubNumSub(ctx, channel).Result()
-	if err != nil {
+func (b *RedisBroker) Publish(ctx context.Context, channel string, msg []byte) (int64, error) {
+	if err := validateContext(ctx); err != nil {
 		return 0, err
 	}
-	return result[channel], nil
+	b.mu.RLock()
+	closed := b.closed
+	client := b.client
+	b.mu.RUnlock()
+	if closed {
+		return 0, ErrBrokerClosed
+	}
+	count, err := client.Publish(ctx, channel, msg).Result()
+	if err != nil {
+		redisBrokerErrors.WithLabelValues("publish").Inc()
+	}
+	return count, err
 }
 
-func (b *RedisBroker) Close() error {
-	var closeErr error
+func (b *RedisBroker) Shutdown(ctx context.Context) error {
+	if err := validateContext(ctx); err != nil {
+		return err
+	}
 
-	b.closeOnce.Do(func() {
-		b.mu.Lock()
+	b.closeMu.Lock()
+	b.mu.Lock()
+	if !b.closed {
 		b.closed = true
 		pubsub := b.pubsub
-		client := b.client
-		subscribers := b.snapshotSubscribersLocked()
 		b.pubsub = nil
+		subscribers := b.snapshotSubscribersLocked()
 		b.handlers = make(map[string]map[uint64]*redisSubscriber)
+		client := b.client
+		ownsClient := b.ownsClient
 		b.mu.Unlock()
 
 		for _, subscriber := range subscribers {
 			subscriber.close()
 		}
 		if pubsub != nil {
-			closeErr = errors.Join(closeErr, pubsub.Close())
+			b.closeErr = errors.Join(b.closeErr, pubsub.Close())
 		}
-		if b.ownsClient && client != nil {
-			closeErr = errors.Join(closeErr, client.Close())
+		if ownsClient {
+			b.closeErr = errors.Join(b.closeErr, client.Close())
 		}
-	})
+	} else {
+		b.mu.Unlock()
+	}
+	closeErr := b.closeErr
+	b.closeMu.Unlock()
 
-	return closeErr
+	done := make(chan struct{})
+	go func() {
+		b.readerWG.Wait()
+		b.workerWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return closeErr
+	case <-ctx.Done():
+		return errors.Join(closeErr, ctx.Err())
+	}
+}
+
+func (b *RedisBroker) closeSubscription(ctx context.Context, channel string, id uint64) error {
+	if err := validateContext(ctx); err != nil {
+		return err
+	}
+
+	b.mu.Lock()
+	handlers := b.handlers[channel]
+	subscriber := handlers[id]
+	if subscriber == nil {
+		b.mu.Unlock()
+		return nil
+	}
+	if len(handlers) == 1 && !b.closed && b.pubsub != nil {
+		if err := b.pubsub.Unsubscribe(ctx, channel); err != nil {
+			b.mu.Unlock()
+			return err
+		}
+	}
+	delete(handlers, id)
+	if len(handlers) == 0 {
+		delete(b.handlers, channel)
+	}
+	b.mu.Unlock()
+	subscriber.close()
+	return nil
 }
 
 func (b *RedisBroker) readLoop(pubsub *redis.PubSub) {
+	defer b.readerWG.Done()
 	for {
 		msg, err := pubsub.ReceiveMessage(context.Background())
 		if err != nil {
-			if b.shouldStop(pubsub) {
+			b.mu.RLock()
+			stop := b.closed || b.pubsub != pubsub
+			b.mu.RUnlock()
+			if stop {
 				return
 			}
 			redisBrokerErrors.WithLabelValues("receive").Inc()
 			time.Sleep(100 * time.Millisecond)
 			continue
 		}
-
 		for _, subscriber := range b.snapshotSubscribers(msg.Channel) {
 			subscriber.dispatch([]byte(msg.Payload))
-		}
-	}
-}
-
-func (b *RedisBroker) unsubscribeOnDone(ctx context.Context, channel string, handlerID uint64) {
-	<-ctx.Done()
-	b.removeHandler(channel, handlerID, true)
-}
-
-func (b *RedisBroker) removeHandler(channel string, handlerID uint64, unsubscribe bool) {
-	b.mu.Lock()
-	handlers := b.handlers[channel]
-	if len(handlers) == 0 {
-		b.mu.Unlock()
-		return
-	}
-	if _, ok := handlers[handlerID]; !ok {
-		b.mu.Unlock()
-		return
-	}
-
-	subscriber := handlers[handlerID]
-	delete(handlers, handlerID)
-	if len(handlers) > 0 {
-		b.mu.Unlock()
-		subscriber.close()
-		return
-	}
-
-	delete(b.handlers, channel)
-	pubsub := b.pubsub
-	closed := b.closed
-	b.mu.Unlock()
-
-	subscriber.close()
-	if unsubscribe && !closed && pubsub != nil {
-		if err := pubsub.Unsubscribe(context.Background(), channel); err != nil {
-			redisBrokerErrors.WithLabelValues("unsubscribe").Inc()
 		}
 	}
 }
@@ -228,45 +218,41 @@ func (b *RedisBroker) removeHandler(channel string, handlerID uint64, unsubscrib
 func (b *RedisBroker) snapshotSubscribers(channel string) []*redisSubscriber {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-
 	registered := b.handlers[channel]
-	if len(registered) == 0 {
-		return nil
+	result := make([]*redisSubscriber, 0, len(registered))
+	for _, subscriber := range registered {
+		result = append(result, subscriber)
 	}
-
-	handlers := make([]*redisSubscriber, 0, len(registered))
-	for _, handler := range registered {
-		handlers = append(handlers, handler)
-	}
-	return handlers
+	return result
 }
 
 func (b *RedisBroker) snapshotSubscribersLocked() []*redisSubscriber {
-	subscribers := make([]*redisSubscriber, 0)
+	result := make([]*redisSubscriber, 0)
 	for _, handlers := range b.handlers {
 		for _, subscriber := range handlers {
-			subscribers = append(subscribers, subscriber)
+			result = append(result, subscriber)
 		}
 	}
-	return subscribers
+	return result
 }
 
-func (b *RedisBroker) shouldStop(pubsub *redis.PubSub) bool {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-	return b.closed || b.pubsub != pubsub
+type redisSubscription struct {
+	broker  *RedisBroker
+	channel string
+	id      uint64
+	closed  atomic.Bool
 }
 
-func (b *RedisBroker) awaitSubscription(ctx context.Context, pubsub *redis.PubSub) error {
-	_, err := pubsub.Receive(ctx)
-	return err
+func (s *redisSubscription) Close(ctx context.Context) error {
+	if s.closed.Load() {
+		return nil
+	}
+	if err := s.broker.closeSubscription(ctx, s.channel, s.id); err != nil {
+		return err
+	}
+	s.closed.Store(true)
+	return nil
 }
-
-func invokeHandler(handler func([]byte), msg []byte) {
-	handler(msg)
-}
-
-const redisSubscriberQueueSize = 1024
 
 type redisSubscriber struct {
 	handler   func([]byte)
@@ -274,29 +260,28 @@ type redisSubscriber struct {
 	closed    chan struct{}
 	closeOnce sync.Once
 	isClosed  atomic.Bool
+	wg        *sync.WaitGroup
 }
 
-func newRedisSubscriber(handler func([]byte)) *redisSubscriber {
-	subscriber := &redisSubscriber{
+func newRedisSubscriber(handler func([]byte), wg *sync.WaitGroup) *redisSubscriber {
+	s := &redisSubscriber{
 		handler: handler,
 		queue:   make(chan []byte, redisSubscriberQueueSize),
 		closed:  make(chan struct{}),
+		wg:      wg,
 	}
-	go subscriber.run()
-	return subscriber
+	wg.Add(1)
+	go s.run()
+	return s
 }
 
 func (s *redisSubscriber) dispatch(msg []byte) {
-	cloned := append([]byte(nil), msg...)
 	if s.isClosed.Load() {
 		return
 	}
-
+	cloned := append([]byte(nil), msg...)
 	select {
 	case s.queue <- cloned:
-		if s.isClosed.Load() {
-			return
-		}
 	case <-s.closed:
 	}
 }
@@ -309,13 +294,13 @@ func (s *redisSubscriber) close() {
 }
 
 func (s *redisSubscriber) run() {
+	defer s.wg.Done()
 	for {
 		select {
 		case msg := <-s.queue:
-			if s.isClosed.Load() {
-				return
+			if !s.isClosed.Load() {
+				s.handler(msg)
 			}
-			invokeHandler(s.handler, msg)
 		case <-s.closed:
 			return
 		}

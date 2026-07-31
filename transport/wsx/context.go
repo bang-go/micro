@@ -2,9 +2,9 @@ package wsx
 
 import "context"
 
-func normalizeContext(ctx context.Context) context.Context {
-	if ctx != nil {
-		return ctx
+func validateContext(ctx context.Context) error {
+	if ctx == nil {
+		return ErrContextRequired
 	}
-	return context.Background()
+	return nil
 }
