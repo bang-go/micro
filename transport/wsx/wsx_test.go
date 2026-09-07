@@ -3,6 +3,7 @@ package wsx
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -126,6 +127,48 @@ func TestEndpointPreparesOnceAndDrainsConnection(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = conn.CloseNow()
+}
+
+func TestEndpointRejectsUnauthorizedHandshakeWithoutBody(t *testing.T) {
+	hub, err := NewHub(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	endpoint, err := NewEndpoint(EndpointConfig{Logger: logger.New()}, hub, func(context.Context, *http.Request) (Session, error) {
+		return nil, errors.New("invalid credentials")
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := endpoint.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(endpoint)
+	defer server.Close()
+	defer endpoint.Shutdown(context.Background())
+
+	response, err := http.Get(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", response.StatusCode, http.StatusUnauthorized)
+	}
+	if response.Header.Get("WWW-Authenticate") != "Bearer" {
+		t.Fatalf("WWW-Authenticate = %q, want Bearer", response.Header.Get("WWW-Authenticate"))
+	}
+	if response.ContentLength != 0 {
+		t.Fatalf("Content-Length = %d, want 0", response.ContentLength)
+	}
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(body) != 0 {
+		t.Fatalf("body length = %d, want 0", len(body))
+	}
 }
 
 func TestConnectCloseNowClosesTransportAfterTermination(t *testing.T) {

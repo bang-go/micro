@@ -100,25 +100,25 @@ func (e *Endpoint) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	rootCtx := e.rootCtx
 	e.mu.Unlock()
 	if !available {
-		http.Error(w, http.StatusText(http.StatusServiceUnavailable), http.StatusServiceUnavailable)
+		writeHandshakeRejection(w, http.StatusServiceUnavailable, false)
 		return
 	}
 	if !e.config.CheckOrigin(r) {
-		http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
+		writeHandshakeRejection(w, http.StatusForbidden, false)
 		return
 	}
 
 	session, err := e.prepare(r.Context(), r)
 	if err != nil {
-		http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
+		writeHandshakeRejection(w, http.StatusUnauthorized, true)
 		return
 	}
 	if session == nil {
-		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		writeHandshakeRejection(w, http.StatusInternalServerError, false)
 		return
 	}
 	if strings.TrimSpace(session.UserID()) == "" {
-		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		writeHandshakeRejection(w, http.StatusInternalServerError, false)
 		return
 	}
 
@@ -152,6 +152,14 @@ func (e *Endpoint) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	e.mu.Unlock()
 
 	go e.serveConnection(sessionCtx, conn, session, cancelConnection, stopRootCancel)
+}
+
+func writeHandshakeRejection(w http.ResponseWriter, status int, authenticate bool) {
+	if authenticate {
+		w.Header().Set("WWW-Authenticate", "Bearer")
+	}
+	w.Header().Set("Content-Length", "0")
+	w.WriteHeader(status)
 }
 
 func (e *Endpoint) serveConnection(
